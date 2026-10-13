@@ -183,6 +183,23 @@ async def test_connect_refusals(pair: tuple[str, PhotonClient, PhotonClient], en
     assert code == {"bad_token": 4401, "not_member": 4403}[case]
 
 
+async def test_socket_survives_reads_longer_than_the_redis_timeout(
+        pair: tuple[str, PhotonClient, PhotonClient], env: Stack) -> None:
+    """Regression: redis-py's default 5 s socket timeout cut every XREAD BLOCK longer than that, closing idle
+    sockets with 1011 (found on the first phone run, where the dev stack blocks for 15 s)."""
+    sid, _, member = pair
+    env.settings.ws_block_ms = 6_000
+    cursor = (await member.snapshot(sid)).cursor
+    async with connect(ws_url(env)) as ws:
+        await hello(ws, member.tokens.access_token, sid, cursor)
+        ready = pb.ServerFrame()
+        ready.ParseFromString(await asyncio.wait_for(ws.recv(), 5))  # type: ignore[arg-type]
+        assert ready.WhichOneof("f") == "ready_cursor"
+        with pytest.raises(TimeoutError):  # nothing to deliver: the socket must simply stay open
+            await asyncio.wait_for(ws.recv(), 8)
+        assert ws.close_code is None
+
+
 async def test_token_expiry_closes_4001(pair: tuple[str, PhotonClient, PhotonClient], env: Stack) -> None:
     sid, _, member = pair
     cursor = (await member.snapshot(sid)).cursor

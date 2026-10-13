@@ -8,7 +8,7 @@ The phases follow the design's build order. The server path is built first and t
 
 ## Build status
 
-Oct 13, 2026. Phases 0–6, the server side of Phases 8 and 9, and the Python tooling are built. The 137 tests pass, ruff is clean, and `mypy --strict` passes on `src/`. The [README](README.md) explains how to run everything.
+Oct 13, 2026. Phases 0–6, the server side of Phases 8 and 9, and the Python tooling are built. The 153 tests pass, ruff is clean, and `mypy --strict` passes on `src/`. The [README](README.md) explains how to run everything.
 
 | Phase | State |
 | --- | --- |
@@ -19,7 +19,7 @@ Oct 13, 2026. Phases 0–6, the server side of Phases 8 and 9, and the Python to
 | 4 Announce and fencing | Built and tested (13 tests, plus the model-based test). |
 | 5 Events | Built and tested (13 tests, including 1,200 events across random reconnects). |
 | 6 Retention | Built and tested (9 tests). |
-| 7 Android | Built ([android/](android/)): the debug APK builds offline, 96 unit tests pass, and lint has 0 errors. Instrumented tests compile but have not run, and the app has not run on a device or emulator. See [android/README.md](android/README.md). |
+| 7 Android | Built ([android/](android/)): the debug APK builds offline, 135 unit tests pass, and lint has 0 errors. On a real phone (a Motorola edge 70 fusion with Android 16), photos taken with PHOTON in the background upload within about 2 s, also after the app's process was killed (the service is restarted and the new-photo trigger fires), and sync resumes after an app update. Instrumented tests compile but have not run, and the app has not run on a device or emulator. See [android/README.md](android/README.md). |
 | 8 Limits, privacy, HTTP/3, push, iOS | Server side built and tested: rate limits, reports, push hints (FCM for Android, APNs for iOS, routed by each device's platform), devices. HTTP/3 is configured in the Caddyfile but not exercised here. iOS ([ios/](ios/)): the PhotonKit core builds and its 90 tests pass on Linux with Swift 6.3. The SwiftUI app target has not been compiled (no Xcode here). See [ios/README.md](ios/README.md). |
 | 9 Operations | Metrics, alerts, Dockerfile, compose, Caddy, Redis config and ACLs written. The ACL file was verified on Redis 7.2 (`test_acl.py`). The load test was run on one machine. Docker files were not run here (no Docker access on the build machine). |
 
@@ -1182,6 +1182,9 @@ These came up while the plan met real code, Redis 7.2 and the tests. Each one is
 - Lua errors outside the contract map onto it: `SESSION_FULL`, `UPLOADS_BLOCKED`, `NOT_HOST` and `KICKED` become `403 FORBIDDEN` with a message, and `CONFLICT` becomes `503 BUSY`.
 
 **Clients and operations**
+- **GitHub sign-in** uses the browser flow, because GitHub isn't OIDC. A GitHub OAuth App has one fixed callback URL, so GitHub returns to `GET /v1/auth/oauth/return` on this server. That page forwards the code and state to the app's own redirect URI from the login attempt; it doesn't consume the state, which the app's callback then uses as before. PKCE between the app and the server is unchanged, and the challenge is passed on to GitHub too. The identity is GitHub's numeric user id, read from the API with the access token, so renaming the account doesn't create a new user. `AuthConfig.github_login` tells the app whether to show the button.
+- **Native Google sign-in on Android.** The phone test showed that a browser page is a poor sign-in, and that HTTPS App Links can't be verified against a development server. Android therefore signs in with the platform account picker (Credential Manager). The app gets the server's Google client id from `GET /v1/auth/config` and a single-use nonce from `POST /v1/auth/nonce`, and posts the ID token to `POST /v1/auth/google`. The server verifies the token as the design asks for OIDC (issuer, audience, expiry, nonce) and consumes the nonce, so a captured token can't be replayed. Accounts are still keyed by `(provider, sub)`. The browser flow with PKCE remains for other providers. Development builds sign in in-app through `POST /v1/auth/dev/login`, which doesn't exist in production.
+- **The blocking Redis client has no socket timeout.** redis-py 8 defaults to 5 s, which cut every `XREAD BLOCK` longer than that and closed idle WebSockets with 1011. Found on the first run on a real phone (a Motorola edge 70 fusion with Android 16); `test_socket_survives_reads_longer_than_the_redis_timeout` covers it. The same run showed sign-in, sessions and camera uploads (3.4 MB and 4.7 MB JPEGs) working on the device.
 - **Push goes to each platform's own service:** FCM for Android devices and APNs (background push, token auth, through aioapns) for iOS devices, chosen by the device row's platform. The iOS app registers an APNs token, which FCM can't deliver to.
 - **The reference client retries transport errors** (a keep-alive connection closed under it, a dropped network) on every call except session creation, because every other call is idempotent. Found by the load test.
 - **uvicorn's keep-alive timeout** is 130 s in production, longer than Caddy's 2-minute upstream keep-alive, so the proxy never reuses a connection the service has just closed.

@@ -4,7 +4,7 @@ import android.content.Intent
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
-import com.photon.app.sync.BootReceiver
+import com.photon.app.sync.RestartReceiver
 import com.photon.app.sync.WorkScheduler
 import com.photon.proto.TokenPair
 import kotlinx.coroutines.delay
@@ -16,7 +16,7 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 
-/** 7.13: a reboot during a session runs the reconcile scan (and the catch-up). */
+/** 7.13: a reboot or an app update during a session resumes it: reconcile, catch-up, triggers. */
 @RunWith(AndroidJUnit4::class)
 class BootReconcileTest {
     private val context = TestSupport.context
@@ -39,7 +39,7 @@ class BootReconcileTest {
 
     @Test
     fun bootCompletedEnqueuesReconcileAndCatchUp() = runBlocking {
-        BootReceiver().onReceive(context, Intent(Intent.ACTION_BOOT_COMPLETED))
+        RestartReceiver().onReceive(context, Intent(Intent.ACTION_BOOT_COMPLETED))
         val wm = WorkManager.getInstance(context)
         withTimeout(10_000) {
             while (wm.getWorkInfosForUniqueWork(WorkScheduler.RECONCILE).get().isEmpty()) delay(50)
@@ -50,9 +50,21 @@ class BootReconcileTest {
     }
 
     @Test
+    fun appUpdateRestartsTheSessionAndArmsTheBackgroundTriggers() = runBlocking {
+        RestartReceiver().onReceive(context, Intent(Intent.ACTION_MY_PACKAGE_REPLACED))
+        val wm = WorkManager.getInstance(context)
+        withTimeout(10_000) {
+            while (wm.getWorkInfosForUniqueWork(WorkScheduler.MEDIA_TRIGGER).get().isEmpty()) delay(50)
+        }
+        assertTrue(wm.getWorkInfosForUniqueWork(WorkScheduler.SAFETY_NET).get().isNotEmpty())
+        assertTrue(wm.getWorkInfosForUniqueWork(WorkScheduler.RECONCILE).get().isNotEmpty())
+        assertTrue(wm.getWorkInfosForUniqueWork(WorkScheduler.UPLOAD_QUEUE).get().isNotEmpty())
+    }
+
+    @Test
     fun withoutASessionBootDoesNothing() = runBlocking {
         graph.db.sessions().clear()
-        BootReceiver().onReceive(context, Intent(Intent.ACTION_BOOT_COMPLETED))
+        RestartReceiver().onReceive(context, Intent(Intent.ACTION_BOOT_COMPLETED))
         delay(1_000)
         assertTrue(WorkManager.getInstance(context).getWorkInfosForUniqueWork(WorkScheduler.RECONCILE).get().isEmpty())
     }

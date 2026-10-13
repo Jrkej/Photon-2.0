@@ -74,15 +74,74 @@ class GoogleProvider:
     async def identity(self, tokens: ProviderTokens, *, nonce: str) -> ProviderIdentity:
         if not tokens.id_token:
             raise ApiError("UNAUTHENTICATED", "No ID token")
+        return await self.verify_id_token(tokens.id_token, nonce=nonce)
+
+    async def verify_id_token(self, id_token: str, *, nonce: str) -> ProviderIdentity:
+        """An ID token from the browser flow or from the platform account picker (Android Credential Manager,
+        iOS): RS256 against Google's JWKS, issuer, audience = our server client id, expiry, and the nonce."""
         try:
-            key = await asyncio.to_thread(self.jwks.get_signing_key_from_jwt, tokens.id_token)
-            claims = jwt.decode(tokens.id_token, key.key, algorithms=["RS256"], audience=self.client_id,
+            key = await asyncio.to_thread(self.jwks.get_signing_key_from_jwt, id_token)
+            claims = jwt.decode(id_token, key.key, algorithms=["RS256"], audience=self.client_id,
                                 issuer=list(self.ISSUERS), options={"require": ["exp", "iss", "aud", "sub"]})
-        except jwt.PyJWTError as e:
+        except (jwt.PyJWTError, jwt.PyJWKClientError) as e:
             raise ApiError("UNAUTHENTICATED", "Invalid ID token") from e
-        if claims.get("nonce") != nonce:
+        if not nonce or claims.get("nonce") != nonce:
             raise ApiError("UNAUTHENTICATED", "ID token nonce mismatch")
         return ProviderIdentity(str(claims["sub"]), str(claims.get("name") or "Google user"))
+
+
+class GitHubProvider:
+    """GitHub OAuth App (not OIDC): the profile comes from the GitHub API, and only the numeric user id is kept as
+    the identity. A GitHub OAuth App has one fixed callback URL, so GitHub returns the browser to this server
+    (/v1/auth/oauth/return), which forwards the code to the app's own redirect URI. PKCE between the app and this
+    server is checked as for every provider; the challenge is passed on to GitHub as well."""
+
+    name = "github"
+    AUTH_URL = "https://github.com/login/oauth/authorize"
+    TOKEN_URL = "https://github.com/login/oauth/access_token"
+    USER_URL = "https://api.github.com/user"
+
+    def __init__(self, client_id: str, client_secret: str, callback_url: str,
+                 http: httpx.AsyncClient | None = None) -> None:
+        self.client_id, self.client_secret, self.callback_url = client_id, client_secret, callback_url
+        self.http = http or httpx.AsyncClient(timeout=10.0)
+
+    def authorization_url(self, *, state: str, code_challenge: str, redirect_uri: str, nonce: str) -> str:
+        return self.AUTH_URL + "?" + urlencode({
+            "client_id": self.client_id, "redirect_uri": self.callback_url, "scope": "read:user", "state": state,
+            "code_challenge": code_challenge, "code_challenge_method": "S256", "allow_signup": "true",
+        })
+
+    async def exchange(self, *, code: str, code_verifier: str, redirect_uri: str) -> ProviderTokens:
+        try:
+            resp = await self.http.post(self.TOKEN_URL, headers={"Accept": "application/json"}, data={
+                "client_id": self.client_id, "client_secret": self.client_secret, "code": code,
+                "redirect_uri": self.callback_url, "code_verifier": code_verifier,
+            })
+        except httpx.TimeoutException as e:
+            raise ApiError("BUSY", "GitHub timed out") from e
+        except httpx.HTTPError as e:
+            raise ApiError("BUSY", "GitHub unreachable") from e
+        body = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+        token = body.get("access_token")
+        if resp.status_code != 200 or not token:  # GitHub answers 200 with {"error": ...} for a bad code
+            raise ApiError("UNAUTHENTICATED", "GitHub refused the sign-in")
+        return ProviderTokens(str(token), None, body)
+
+    async def identity(self, tokens: ProviderTokens, *, nonce: str) -> ProviderIdentity:
+        try:
+            resp = await self.http.get(self.USER_URL, headers={
+                "Authorization": f"Bearer {tokens.access_token}", "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "photon",
+            })
+        except httpx.HTTPError as e:
+            raise ApiError("BUSY", "GitHub unreachable") from e
+        if resp.status_code != 200:
+            raise ApiError("UNAUTHENTICATED", "Could not read the GitHub profile")
+        user = resp.json()
+        if not isinstance(user.get("id"), int):
+            raise ApiError("UNAUTHENTICATED", "GitHub profile has no id")
+        return ProviderIdentity(str(user["id"]), str(user.get("name") or user.get("login") or "GitHub user"))
 
 
 class DevProvider:

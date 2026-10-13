@@ -1,6 +1,10 @@
 package com.photon.app.net
 
 import com.photon.proto.AnnounceRequest
+import com.photon.proto.AuthConfig
+import com.photon.proto.DevLoginRequest
+import com.photon.proto.GoogleSignInRequest
+import com.photon.proto.NonceResponse
 import com.photon.proto.AnnounceResponse
 import com.photon.proto.CreateSessionRequest
 import com.photon.proto.DeviceRegistration
@@ -41,6 +45,21 @@ class PhotonApi(
 
     suspend fun refresh(refreshToken: String): TokenPair =
         authClient.callProto(post("v1/auth/refresh", RefreshRequest(refresh_token = refreshToken).toProtoBody()), TokenPair.ADAPTER)
+
+    /** `GET /v1/auth/config`: which sign-in methods the server offers. */
+    suspend fun authConfig(): AuthConfig =
+        authClient.callProto(get(url("v1/auth/config")), AuthConfig.ADAPTER)
+
+    /** `POST /v1/auth/nonce`: single use, 10 minutes; the Google ID token must carry it. */
+    suspend fun authNonce(): NonceResponse =
+        authClient.callProto(post("v1/auth/nonce", emptyProtoBody()), NonceResponse.ADAPTER)
+
+    suspend fun googleSignIn(req: GoogleSignInRequest): TokenPair =
+        authClient.callProto(post("v1/auth/google", req.toProtoBody()), TokenPair.ADAPTER)
+
+    /** Development servers only (404 elsewhere). */
+    suspend fun devLogin(req: DevLoginRequest): TokenPair =
+        authClient.callProto(post("v1/auth/dev/login", req.toProtoBody()), TokenPair.ADAPTER)
 
     suspend fun registerDevice(reg: DeviceRegistration) {
         client.callUnit(Request.Builder().url(url("v1/devices/current")).put(reg.toProtoBody()).build())

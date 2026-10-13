@@ -204,3 +204,25 @@ message ServerFrame {
     string     ready_cursor = 4;
   }
 }
+
+// ---------------------------------------------------------------- native sign-in (added)
+
+message AuthConfig {            // GET /v1/auth/config: which sign-in methods this server offers
+  string google_client_id = 1;  // the server (web) OAuth client id; empty when Google sign-in is off
+  bool   dev_login        = 2;  // development only: sign in with a bare username
+  bool   github_login     = 3;  // the browser flow with provider "github" is available
+}
+
+message NonceResponse {         // POST /v1/auth/nonce: single use, 10 minutes
+  string nonce         = 1;
+  int64  expires_at_ms = 2;
+}
+
+message GoogleSignInRequest {   // POST /v1/auth/google: an ID token from Android Credential Manager / iOS
+  string id_token = 1;
+  string nonce    = 2;          // the nonce from /v1/auth/nonce, which the ID token must carry
+}
+
+message DevLoginRequest {       // POST /v1/auth/dev/login (development only)
+  string username = 1;
+}

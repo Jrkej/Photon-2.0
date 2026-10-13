@@ -2,11 +2,39 @@
 <resources>
     <string name="app_name">PHOTON</string>
 
-    <!-- Login -->
-    <string name="login_title">Share photos live with the people around you</string>
-    <string name="login_button">Sign in</string>
-    <string name="login_in_progress">Waiting for the browser…</string>
-    <string name="login_failed">Sign-in failed: %1$s</string>
+    <!-- Sign-in -->
+    <string name="login_pitch">Share photos live with everyone in the room</string>
+    <string name="login_step_1_title">Take photos as usual</string>
+    <string name="login_step_1_body">Use your normal camera app. Nothing to tap.</string>
+    <string name="login_step_2_title">Everyone in the session gets them</string>
+    <string name="login_step_2_body">They land in each member\'s gallery within seconds.</string>
+    <string name="login_step_3_title">Server copies vanish after 30 minutes</string>
+    <string name="login_step_3_body">PHOTON passes photos along; it doesn\'t keep them.</string>
+    <string name="login_google">Continue with Google</string>
+    <string name="login_google_unavailable">Google sign-in isn\'t set up on this server.</string>
+    <string name="login_config_failed">Can\'t reach the PHOTON server. Check your connection.</string>
+    <string name="login_signing_in">Signing in…</string>
+    <string name="login_dev_title">Developer sign-in</string>
+    <string name="login_dev_body">Debug builds only: sign in to the development server with any username.</string>
+    <string name="login_dev_username">Username</string>
+    <string name="login_dev_username_hint">1–40 letters, digits, _ . or -</string>
+    <string name="login_dev_button">Sign in as developer</string>
+    <string name="login_add_account">Add account</string>
+    <string name="signin_problem_no_account">This phone needs a Google account to sign in. Add one in Settings, then try again.</string>
+    <string name="signin_problem_google">Google sign-in didn\'t work. Try again.</string>
+    <string name="signin_problem_rejected">The server didn\'t accept that sign-in. Try again.</string>
+    <string name="signin_problem_not_configured">Google sign-in isn\'t set up on this server.</string>
+    <string name="signin_problem_dev_off">Developer sign-in is turned off on this server.</string>
+    <string name="signin_problem_username">Usernames are 1–40 letters, digits, _ . or -.</string>
+    <string name="signin_problem_rate_limited">Too many attempts. Wait a minute and try again.</string>
+    <string name="signin_problem_offline">Can\'t reach the PHOTON server. Check your connection and try again.</string>
+    <string name="signin_problem_github">GitHub sign-in didn\'t work. Try again.</string>
+    <string name="signin_problem_github_not_configured">GitHub sign-in isn\'t set up on this server.</string>
+    <string name="signin_problem_expired">That sign-in expired or was already used. Try again.</string>
+    <string name="signin_problem_state">That sign-in link is from a different attempt. Try again.</string>
+    <string name="signin_problem_no_browser">A web browser is needed to sign in with GitHub.</string>
+    <string name="login_github">Continue with GitHub</string>
+    <string name="signin_problem_server">Something went wrong on the server. Try again.</string>
     <string name="sign_out">Sign out</string>
 
     <!-- Home -->
@@ -85,6 +113,11 @@
     <string name="notif_upload_rejected_text">The server rejected it (%1$s).</string>
     <string name="notif_transfer">Transferring photos</string>
 
+    <!-- Background sync -->
+    <string name="battery_title">Allow PHOTON to keep sharing in the background</string>
+    <string name="battery_body">Your phone limits apps in the background to save battery, which can stop sharing when PHOTON isn\'t open. Allow PHOTON to run in the background while you are in a session.</string>
+    <string name="battery_allow">Allow</string>
+
     <!-- Host change and ALREADY_IN_SESSION -->
     <string name="now_host_message">You are now the host of this session.</string>
     <string name="conflict_title_retry">You\'re already in a session</string>
@@ -102,5 +135,7 @@
     <string name="conflict_leave">Leave it</string>
     <string name="conflict_leave_and_continue">Leave it and continue</string>
 
+    <string name="retry">Try again</string>
+    <string name="dismiss">Dismiss</string>
     <string name="error_generic">Something went wrong: %1$s</string>
 </resources>

@@ -40,7 +40,6 @@ android {
         debug {
             buildConfigField("String", "API_BASE", quoted(prop("photon.debug.apiBase", "http://10.0.2.2:8080")))
             buildConfigField("String", "IMAGE_BASE", quoted(prop("photon.debug.imageBase", "http://10.0.2.2:8081")))
-            buildConfigField("String", "OAUTH_PROVIDER", quoted("dev"))
             buildConfigField("String", "OAUTH_REDIRECT_URI", quoted("photon://auth/cb"))
             // The dev backend builds absolute URLs (upload_url, the dev login page) from its own
             // default of localhost, which the emulator can't reach; debug builds point those at
@@ -52,7 +51,6 @@ android {
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             buildConfigField("String", "API_BASE", quoted(prop("photon.release.apiBase", "https://api.$appLinkHost")))
             buildConfigField("String", "IMAGE_BASE", quoted(prop("photon.release.imageBase", "https://img.$appLinkHost")))
-            buildConfigField("String", "OAUTH_PROVIDER", quoted(prop("photon.release.oauthProvider", "google")))
             buildConfigField("String", "OAUTH_REDIRECT_URI", quoted("https://$appLinkHost/auth/cb"))
             buildConfigField("boolean", "REWRITE_LOCAL_URLS", "false")
         }
@@ -134,6 +132,10 @@ dependencies {
 
     implementation(platform(libs.firebase.bom))
     implementation(libs.firebase.messaging)
+
+    implementation(libs.credentials.core)
+    implementation(libs.credentials.playservices)
+    implementation(libs.googleid)
 
     implementation(libs.zxing.core)
     implementation(libs.zxing.android.embedded)

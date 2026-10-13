@@ -1,15 +1,18 @@
 package com.photon.app.sync
 
 import android.content.Context
+import android.provider.MediaStore
 import androidx.work.BackoffPolicy
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
+import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.ExistingWorkPolicy
 import androidx.work.ForegroundInfo
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequest
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.OutOfQuotaPolicy
+import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
@@ -53,6 +56,43 @@ class WorkScheduler(context: Context) {
     fun cancelUploads() {
         wm.cancelUniqueWork(UPLOAD_QUEUE)
         wm.cancelUniqueWork(UPLOAD_WAKEUP)
+    }
+
+    /**
+     * The jobs that keep a session alive when the process is dead or the service was refused:
+     * the media trigger and the 15-minute safety net. Both are session work, so they are
+     * cancelled when the session ends. KEEP: an armed trigger is left alone.
+     */
+    fun ensureBackgroundTriggers() {
+        wm.enqueueUniqueWork(MEDIA_TRIGGER, ExistingWorkPolicy.KEEP, mediaTriggerRequest())
+        val safetyNet = PeriodicWorkRequestBuilder<SafetyNetWorker>(15, TimeUnit.MINUTES)
+            .addTag(TAG_SESSION)
+            .build()
+        wm.enqueueUniquePeriodicWork(SAFETY_NET, ExistingPeriodicWorkPolicy.KEEP, safetyNet)
+    }
+
+    /**
+     * Content-URI triggers fire once, so the trigger job re-arms itself when it runs. Appending
+     * (rather than replacing) lets the running job finish instead of cancelling it.
+     */
+    fun rearmMediaTrigger() {
+        wm.enqueueUniqueWork(MEDIA_TRIGGER, ExistingWorkPolicy.APPEND_OR_REPLACE, mediaTriggerRequest())
+    }
+
+    /**
+     * Runs when MediaStore images change, even with the process dead (JobScheduler holds the
+     * trigger). No network constraint: the scan is local, and the upload work it enqueues has one.
+     */
+    private fun mediaTriggerRequest(): OneTimeWorkRequest {
+        val constraints = Constraints.Builder()
+            .addContentUriTrigger(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, true)
+            .setTriggerContentUpdateDelay(1, TimeUnit.SECONDS)
+            .setTriggerContentMaxDelay(5, TimeUnit.SECONDS)
+            .build()
+        return OneTimeWorkRequestBuilder<MediaTriggerWorker>()
+            .setConstraints(constraints)
+            .addTag(TAG_SESSION)
+            .build()
     }
 
     /** 7.6: session start, app start, service restart, boot, resume from pause. */
@@ -139,6 +179,8 @@ class WorkScheduler(context: Context) {
     companion object {
         const val TAG_SESSION = "photon-session"
         const val UPLOAD_QUEUE = "upload-queue"
+        const val MEDIA_TRIGGER = "media-trigger"
+        const val SAFETY_NET = "safety-net"
         const val UPLOAD_WAKEUP = "upload-wakeup"
         const val RECONCILE = "reconcile"
         const val CATCH_UP = "catch-up"

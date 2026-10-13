@@ -38,15 +38,51 @@ The app talks to two hosts, set at build time in `BuildConfig`:
 ./gradlew assembleRelease -Pphoton.release.apiBase=https://api.example.org -Pphoton.release.imageBase=https://img.example.org
 ```
 
-Other properties: `photon.appLinkHost` (default `photon.example`; the host of invite links `https://<host>/j/<token>` and of the OAuth App Link `https://<host>/auth/cb`) and `photon.release.oauthProvider` (default `google`).
+Another property: `photon.appLinkHost` (default `photon.example`), the host of invite links `https://<host>/j/<token>` and of the OAuth App Link `https://<host>/auth/cb`.
 
 Cleartext HTTP is allowed in debug builds only (`src/debug/res/xml/network_security_config.xml`); release builds are TLS-only.
 
 The WebSocket URL is derived from `API_BASE` (`http` → `ws`, `https` → `wss`) plus `/v1/ws`.
 
-### Login
+### Sign-in
 
-Debug builds use the backend's `dev` OAuth provider and the redirect `photon://auth/cb` (declared only in the debug manifest). Release builds use `photon.release.oauthProvider` and the verified App Link `https://<appLinkHost>/auth/cb`; the backend serves `/.well-known/assetlinks.json` for package `com.photon.app` and must list the release signing certificate's SHA-256.
+The app signs in without a browser:
+
+- **Google**, through Credential Manager ("Continue with Google"). The app asks the server for `GET /v1/auth/config` (which carries the server's web OAuth client id) and a single-use `POST /v1/auth/nonce`. It then gets a Google ID token for that client id and nonce from the system account picker and posts both to `POST /v1/auth/google`. No client id is compiled into the APK. If the server has no Google client configured, the screen says "Google sign-in isn't set up on this server" instead of showing the button.
+- **GitHub** ("Continue with GitHub", shown when the config says `github_login`), through the browser with PKCE:
+  1. `POST /v1/auth/oauth/start` with `provider = "github"`, the redirect URI and the PKCE challenge.
+  2. The returned `authorization_url` opens in a Custom Tab, never a WebView.
+  3. GitHub sends the browser to the server's `/v1/auth/oauth/return`, which forwards to the redirect URI.
+  4. The app posts `code`, `state` and the verifier to `POST /v1/auth/oauth/callback`.
+
+  The redirect URI is `photon://auth/cb` in debug builds and the App Link `https://<appLinkHost>/auth/cb` in release builds; both open `MainActivity`. The verifier and `state` are kept in encrypted storage, so a login completes even if Android killed the app while the browser was open.
+
+  Edge cases: closing the tab without finishing just stops the spinner, and `error=access_denied` is a quiet cancel. A `state` that doesn't match the login in progress is an error. A 401 from the callback (expired or already used) asks to try again. The same redirect delivered twice is handled once.
+- **Developer sign-in** (debug builds only, and only when the server's config says `dev_login`): a username field that calls `POST /v1/auth/dev/login`.
+
+#### Setting up Google sign-in (one time, in Google Cloud)
+
+1. In the [Google Cloud console](https://console.cloud.google.com/), create or pick a project, and configure the **OAuth consent screen** (External; while it is in "Testing", add your Google account under test users).
+2. **Credentials → Create credentials → OAuth client ID → Web application** (for example "PHOTON server"). Copy its client ID; it goes to the backend as `PHOTON_GOOGLE_CLIENT_ID` (and its secret as `PHOTON_GOOGLE_CLIENT_SECRET` if the backend asks for one). This is the id the app receives from `/v1/auth/config`, and the audience of every ID token.
+3. **Credentials → Create credentials → OAuth client ID → Android**, in the **same project**: package name `com.photon.app`, SHA-1 of the signing certificate. For the debug keystore on this machine:
+   ```
+   06:84:B0:38:CE:5C:D7:27:21:3F:FE:33:4A:61:DA:DA:0A:10:36:79
+   ```
+   (`keytool -list -v -keystore ~/.android/debug.keystore -alias androiddebugkey -storepass android` prints it). Add another Android client with the release key's SHA-1 before shipping a release build. The Android client is never referenced by the app; Google uses it to recognise the app by package and signature.
+4. Restart the backend. `GET /v1/auth/config` should now return the web client id.
+5. The phone needs Google Play services and a Google account. Without an account the app explains that and offers "Add account".
+
+#### Setting up GitHub sign-in (one time, on GitHub)
+
+1. On GitHub: **Settings → Developer settings → OAuth Apps → New OAuth App**.
+2. **Homepage URL**: anything, for example `https://photon.example`.
+3. **Authorization callback URL**: the server's return page, not the app.
+   - USB development (phone on `adb reverse tcp:8080 tcp:8080`): `http://127.0.0.1:8080/v1/auth/oauth/return`
+   - Production: `https://<api host>/v1/auth/oauth/return`
+4. Create the app, then generate a client secret. On the backend set `PHOTON_GITHUB_CLIENT_ID` and `PHOTON_GITHUB_CLIENT_SECRET`, and restart it; `GET /v1/auth/config` then reports `github_login`.
+5. Nothing GitHub-specific goes into the APK. In debug builds the redirect `photon://auth/cb` must be among the backend's dev redirect URIs (it is by default). In release builds the App Link must verify (`/.well-known/assetlinks.json` with the release certificate).
+
+It can take a few minutes after creating the Google clients before Google sign-in works. A `GetCredentialException` with "developer console is not set up correctly" (logged under the `PHOTON` tag) almost always means that the SHA-1 or the package of the Android client doesn't match, or that the clients are in different projects.
 
 ### Push (optional)
 
@@ -59,9 +95,9 @@ FCM is optional. Without `app/google-services.json` the Google Services plugin i
    PHOTON_API_BASE_URL=http://10.0.2.2:8080 PHOTON_IMAGE_BASE_URL=http://10.0.2.2:8081 ...
    ```
    Debug builds also rewrite `localhost` URLs (the dev login page and `AnnounceResponse.upload_url`) to `API_BASE`/`IMAGE_BASE`, so the defaults work on an emulator too. On a physical device use the host's LAN address in both the backend settings and `-Pphoton.debug.*`.
-2. Make sure `photon://auth/cb` is one of the backend's registered dev redirect URIs (it is by default: `PHOTON_DEV_REDIRECT_URIS`).
+2. Sign-in: with the dev provider enabled (the default for `PHOTON_ENV=dev`), debug builds show "Developer sign-in". For Google sign-in, set up the clients as described above.
 3. Install and launch: `./gradlew installDebug`, then open PHOTON.
-4. Sign in: Custom Tabs opens the dev login page; enter any username. The page redirects to `photon://auth/cb`, which returns to the app.
+4. Sign in: "Continue with Google", or (debug) type any username under "Developer sign-in".
 5. Start a session (the code and QR appear), or join one by code, by scanning the QR, or by opening an invite link. Grant photo access ("Allow all") and notifications.
 6. Take a photo with the camera app. It is queued, uploaded in chunks, and shows as "Shared". Other members (another emulator, or `tools/photon_cli.py listen`) receive it: thumbnail first, then preview, then the original in `Pictures/PHOTON/`.
 
@@ -78,7 +114,8 @@ app/src/main/java/com/photon/app/
   net/                    OkHttp clients, protobuf over HTTP, ErrorMapper/ApiException, RetryPolicy,
                           AuthInterceptor + single-flight TokenRefresher, PhotonApi (API_BASE), ImageApi (IMAGE_BASE),
                           ImageTransport (Cronet with OkHttp fallback)
-  auth/                   PKCE, LoginManager (Custom Tabs flow)
+  auth/                   AuthService (Google via Credential Manager, dev login), GoogleIdTokens, sign-in rules;
+                          BrowserOAuth + BrowserLogin (GitHub via Custom Tabs, PKCE)
   session/                SessionManager (create/join/leave/kick/end/rotate/pause, local teardown), invite parsing, purge
   sync/                   SyncService (specialUse foreground service + ContentObserver), MediaScanner, Eligibility,
                           ReconcileWorker, BootReceiver, WorkScheduler
@@ -96,6 +133,8 @@ Choices worth knowing:
 - **Pause.** Photos captured while sharing is paused are never shared, also not by the reconcile scan after resuming: each pause becomes a window the eligibility filter excludes.
 - **Echo prevention.** Received originals are saved with `IS_PENDING = 1` into `Pictures/PHOTON/`; the media id goes into `received_assets` (and the hash into `hashes`) before `IS_PENDING` is cleared, so the row is known before any observer can see it. Then the folder, the owner package and the hash set apply, and the server's dedupe last.
 - **WAITING.** `IN_PROGRESS` never marks a photo as synced: it waits for the `PHOTO_STORED` event, re-announcing after 2 minutes and backing off to 15.
+- **Staying alive in the background.** `SyncService` is a `specialUse` foreground service. It is started when a session begins, when the app comes to the foreground, at process start, after boot and after an app update (`RestartReceiver`, `MY_PACKAGE_REPLACED`). If the process is killed (swiped from recents, an update, the vendor's battery manager), two WorkManager jobs keep sharing going. A content-URI trigger on `MediaStore.Images` fires about 1–5 s after a new photo appears, even with the process dead; it queues the photo, enqueues the upload and re-arms itself. A 15-minute periodic safety net runs the reconcile scan, uploads and catch-up. Both also try to restart the service. Android refuses that from the background unless the app is exempt from battery optimisation, which the session screen asks for. Every start and stop of the service is logged with its reason (`adb logcat -s PHOTON`).
+- **Sign-out.** Only a 401 from `POST /v1/auth/refresh` signs the user out. A 4401 close first tries a refresh. 4403 and 4410 end the local session only after `GET /v1/sessions/current` confirms it. Everything transient (5xx, 1011, timeouts, other refresh errors) keeps tokens, session and service, and retries with backoff.
 - **Refresh.** One refresh at a time (a `Mutex`); concurrent 401s reuse the new token. It is an application interceptor, not an `Authenticator`, because Cronet's interceptor bypasses OkHttp's follow-up handling.
 - **Host changes.** `HOST_CHANGED` updates the stored role and host, and the host-only actions (kick, end, rotate invites, recalling others' photos) follow it. A snapshot carries no host, so after every resync the app re-reads role and host from `GET /v1/sessions/current`.
 - **Already in a session.** When create or join answers `409 ALREADY_IN_SESSION`, the app asks `GET /v1/sessions/current` which session that is and offers to open it on this device or leave it and continue. At start-up and after login, a session the server knows but the device lost is offered the same way (never reopened silently, since that would start sharing photos). Opening it this way uses the current time as the join time.
@@ -123,7 +162,7 @@ The end-to-end test in the plan (two emulators and the Python script client in o
 This project was built and unit-tested on a machine without an emulator image or a device, so:
 
 - **The instrumented tests have been compiled but never run.** `CameraCaptureTest` depends on the device's camera app honouring `KEYCODE_CAMERA`.
-- **Nothing has run on a real device or emulator**: the foreground service and its notification actions, the ContentObserver, MediaStore saving with `IS_PENDING`, Custom Tabs login and the redirect, QR scanning, WorkManager scheduling, and Cronet/QUIC (needs Google Play services and an HTTPS image server that advertises `Alt-Svc`).
+- **Device testing so far** has been done by hand on a Motorola edge 70 fusion (Android 16). From this machine nothing was installed or run: the Credential Manager sign-in, the content-URI trigger and safety-net jobs, the battery-optimisation prompt, and the restart after an update are verified by build and unit tests only. Also unverified: Cronet/QUIC, which needs Google Play services and an HTTPS image server that advertises `Alt-Svc`.
 - **GPS redaction** (Android 10+ without `ACCESS_MEDIA_LOCATION`) must be checked for JPEG and HEIC on real devices, as the plan asks. The app strips GPS itself from JPEG, PNG and WebP when it still finds it, and skips a HEIC that still has a location rather than share it.
 - **Camera folder names** differ between manufacturers; the filter accepts anything under `DCIM/` except `Screenshots`. Check Pixel, Samsung and Xiaomi.
 - **The release App Link** needs the real domain, `assetlinks.json` with the release certificate, and a release signing config (none is set up).

@@ -1,12 +1,19 @@
 package com.photon.app.ui
 
 import android.app.Application
+import android.content.ActivityNotFoundException
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.photon.app.BuildConfig
 import com.photon.app.R
-import com.photon.app.auth.LoginException
+import com.photon.app.auth.AuthRules
+import com.photon.app.auth.GoogleTokenResult
+import com.photon.app.auth.BrowserLoginTracker
+import com.photon.app.auth.OAuthRedirect
+import com.photon.app.auth.SignInMethod
+import com.photon.app.auth.SignInOutcome
+import com.photon.app.auth.SignInProblem
 import com.photon.app.data.db.PendingPhoto
 import com.photon.app.data.db.ReceivedPhoto
 import com.photon.app.data.db.SessionState
@@ -19,6 +26,7 @@ import com.photon.app.session.InviteLinks
 import com.photon.app.session.JoinConflict
 import com.photon.app.session.JoinTarget
 import com.photon.app.session.SessionRules
+import com.photon.proto.AuthConfig
 import com.photon.proto.SessionInfo
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -48,14 +56,26 @@ sealed interface Consent {
  */
 data class SessionConflict(val info: SessionInfo, val retry: Consent?)
 
+/** The sign-in screen. [config] says which methods the server offers. */
+data class LoginState(
+    val config: AuthConfig? = null,
+    val loadingConfig: Boolean = false,
+    val configFailed: Boolean = false,
+    val signingIn: Boolean = false,
+    val problem: SignInProblem? = null,
+    /** The method behind [problem], so "Try again" repeats it. */
+    val lastMethod: SignInMethod? = null,
+)
+
 data class UiState(
     val busy: Boolean = false,
-    val loginInProgress: Boolean = false,
     val consent: Consent? = null,
     val conflict: SessionConflict? = null,
     /** An invite opened while signed out, kept until login finishes. */
     val pendingInvite: JoinTarget? = null,
 )
+
+private const val GITHUB = "github"
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class AppViewModel(application: Application) : AndroidViewModel(application) {
@@ -64,6 +84,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private val state = MutableStateFlow(UiState())
     val ui: StateFlow<UiState> = state.asStateFlow()
+
+    private val loginFlow = MutableStateFlow(LoginState())
+    private val browserLogin = BrowserLoginTracker()
+    val login: StateFlow<LoginState> = loginFlow.asStateFlow()
 
     private val messageChannel = Channel<String>(Channel.BUFFERED)
     val messages: Flow<String> = messageChannel.receiveAsFlow()
@@ -96,6 +120,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         viewModelScope.launch {
+            signedIn.collect { if (!it && loginFlow.value.config == null) loadAuthConfig() }
+        }
+        viewModelScope.launch {
             var previous: SessionState? = null
             graph.sessions.session.collect { current ->
                 if (SessionRules.becameHost(previous, current)) messageChannel.trySend(app.getString(R.string.now_host_message))
@@ -122,8 +149,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     /** A deep link: the OAuth redirect or an invite. */
     fun onLink(uri: Uri) {
-        if (graph.login.isRedirect(uri)) {
-            finishLogin(uri)
+        if (graph.browserOAuth.isRedirect(uri.toString())) {
+            finishBrowserLogin(uri)
             return
         }
         val target = InviteLinks.parse(uri.toString(), BuildConfig.APP_LINK_HOST) ?: return
@@ -136,23 +163,100 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     // ---- login
 
-    fun startLogin(open: (Uri) -> Unit) = launchBusy {
-        state.update { it.copy(loginInProgress = true) }
-        try {
-            open(graph.login.start())
-        } catch (e: Exception) {
-            state.update { it.copy(loginInProgress = false) }
-            throw e
+    // ---- sign-in (Credential Manager, or a username on dev servers)
+
+    fun loadAuthConfig() {
+        if (loginFlow.value.loadingConfig) return
+        loginFlow.update { it.copy(loadingConfig = true, configFailed = false) }
+        viewModelScope.launch {
+            try {
+                val config = graph.auth.config()
+                loginFlow.update { it.copy(config = config, loadingConfig = false) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                loginFlow.update { it.copy(loadingConfig = false, configFailed = true) }
+            }
         }
     }
 
-    private fun finishLogin(uri: Uri) = launchBusy {
-        try {
-            graph.login.finish(uri)
-            graph.sessions.onSignedIn()
-        } finally {
-            state.update { it.copy(loginInProgress = false) }
+    /** [idToken] runs the account picker; it needs the activity, so the screen provides it. */
+    fun signInWithGoogle(idToken: suspend (clientId: String, nonce: String) -> GoogleTokenResult) {
+        val clientId = AuthRules.googleClientId(loginFlow.value.config) ?: return
+        runSignIn(SignInMethod.GOOGLE) { graph.auth.signInWithGoogle(clientId, idToken) }
+    }
+
+    fun devSignIn(username: String) = runSignIn(SignInMethod.DEV) { graph.auth.devLogin(username) }
+
+    /**
+     * GitHub, through the browser: [openBrowser] shows the provider page in a Custom Tab. The
+     * login finishes in [onLink] when the redirect comes back, possibly in a new process.
+     */
+    fun signInWithGitHub(openBrowser: (Uri) -> Unit) {
+        if (loginFlow.value.signingIn) return
+        loginFlow.update { it.copy(signingIn = true, problem = null, lastMethod = SignInMethod.GITHUB) }
+        viewModelScope.launch {
+            try {
+                val url = graph.browserOAuth.start(GITHUB)
+                browserLogin.launched()
+                openBrowser(Uri.parse(url))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: ActivityNotFoundException) {
+                browserLogin.redirectArrived()
+                loginFlow.update { it.copy(signingIn = false, problem = SignInProblem.NO_BROWSER) }
+            } catch (e: Exception) {
+                val problem = if (e is ApiException || e is IOException) AuthRules.problemFor(e, SignInMethod.GITHUB) else SignInProblem.GITHUB_FAILED
+                loginFlow.update { it.copy(signingIn = false, problem = problem) }
+            }
         }
+    }
+
+    /** The sign-in screen resumed. Without a redirect, the user closed the browser: stop loading. */
+    fun onLoginScreenResumed() {
+        if (browserLogin.resumedWithoutRedirect()) loginFlow.update { it.copy(signingIn = false) }
+    }
+
+    /** Redirects being finished; the server's return page can deliver the same one twice. */
+    private var redirectsInFlight = 0
+
+    private fun finishBrowserLogin(uri: Uri) {
+        browserLogin.redirectArrived()
+        redirectsInFlight++
+        loginFlow.update { it.copy(signingIn = true, lastMethod = SignInMethod.GITHUB) }
+        viewModelScope.launch {
+            try {
+                when (val outcome = graph.browserOAuth.finish(OAuthRedirect.parse(uri.toString()))) {
+                    SignInOutcome.SignedIn -> afterSignIn()
+                    SignInOutcome.Cancelled, SignInOutcome.Ignored -> Unit
+                    is SignInOutcome.Failed -> loginFlow.update { it.copy(problem = outcome.problem) }
+                }
+            } finally {
+                if (--redirectsInFlight == 0) loginFlow.update { it.copy(signingIn = false) }
+            }
+        }
+    }
+
+    fun dismissSignInProblem() = loginFlow.update { it.copy(problem = null) }
+
+    private fun runSignIn(method: SignInMethod, block: suspend () -> SignInOutcome) {
+        if (loginFlow.value.signingIn) return
+        loginFlow.update { it.copy(signingIn = true, problem = null, lastMethod = method) }
+        viewModelScope.launch {
+            try {
+                when (val outcome = block()) {
+                    SignInOutcome.SignedIn -> afterSignIn()
+                    SignInOutcome.Cancelled, SignInOutcome.Ignored -> Unit
+                    is SignInOutcome.Failed -> loginFlow.update { it.copy(problem = outcome.problem) }
+                }
+            } finally {
+                loginFlow.update { it.copy(signingIn = false) }
+            }
+        }
+    }
+
+    private suspend fun afterSignIn() {
+        graph.sessions.onSignedIn()
         if (graph.sessions.current() == null) checkServerSession()
         state.value.pendingInvite?.let { target ->
             state.update { it.copy(pendingInvite = null) }
@@ -263,8 +367,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 block()
             } catch (e: ApiException) {
                 messageChannel.trySend(describe(e))
-            } catch (e: LoginException) {
-                messageChannel.trySend(app.getString(R.string.login_failed, e.message.orEmpty()))
             } catch (e: IOException) {
                 messageChannel.trySend(app.getString(R.string.error_generic, e.message ?: "network error"))
             } catch (e: CancellationException) {

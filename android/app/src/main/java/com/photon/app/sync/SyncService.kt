@@ -44,8 +44,13 @@ class SyncService : LifecycleService() {
 
     override fun onCreate() {
         super.onCreate()
-        startInForeground(buildNotification(null))
+        Log.i(TAG, "SyncService created")
+        if (!startInForeground(buildNotification(null))) {
+            stopSelf()
+            return
+        }
         val graph = applicationContext.graph
+        graph.scheduler.ensureBackgroundTriggers()
 
         observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
             override fun onChange(selfChange: Boolean, uri: Uri?) {
@@ -73,6 +78,7 @@ class SyncService : LifecycleService() {
         lifecycleScope.launch {
             graph.db.sessions().observe().distinctUntilChanged().collectLatest { s ->
                 if (s == null) {
+                    Log.i(TAG, "SyncService stopping itself: no active session")
                     stopSelf()
                     return@collectLatest
                 }
@@ -96,6 +102,7 @@ class SyncService : LifecycleService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
         val graph = applicationContext.graph
+        Log.i(TAG, "SyncService start command: ${intent?.action ?: "restarted by the system"} (${intent?.getStringExtra(EXTRA_REASON) ?: "-"})")
         when (intent?.action) {
             ACTION_PAUSE -> lifecycleScope.launch { graph.sessions.setPaused(true) }
             ACTION_RESUME -> lifecycleScope.launch { graph.sessions.setPaused(false) }
@@ -110,6 +117,7 @@ class SyncService : LifecycleService() {
                 // Restarted by the system (START_STICKY): catch up on what the observer missed.
                 lifecycleScope.launch {
                     if (graph.db.sessions().get() == null) {
+                        Log.i(TAG, "SyncService stopping itself after a system restart: no active session")
                         stopSelf()
                     } else {
                         graph.scheduler.enqueueReconcile()
@@ -122,17 +130,26 @@ class SyncService : LifecycleService() {
     }
 
     override fun onDestroy() {
+        Log.i(TAG, "SyncService destroyed")
         observer?.let { contentResolver.unregisterContentObserver(it) }
         applicationContext.graph.connection.release(HOLDER)
         super.onDestroy()
     }
 
-    private fun startInForeground(notification: Notification) {
+    /** False when the system refuses the foreground start (the app lost its exemption meanwhile). */
+    private fun startInForeground(notification: Notification): Boolean = try {
         if (Build.VERSION.SDK_INT >= 34) {
             startForeground(Notifications.ID_SYNC, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         } else {
             startForeground(Notifications.ID_SYNC, notification)
         }
+        true
+    } catch (e: IllegalStateException) {
+        Log.w(TAG, "SyncService could not enter the foreground", e)
+        false
+    } catch (e: SecurityException) {
+        Log.w(TAG, "SyncService could not enter the foreground", e)
+        false
     }
 
     private fun buildNotification(s: SessionState?): Notification {
@@ -174,23 +191,31 @@ class SyncService : LifecycleService() {
         private const val OBSERVER_DEBOUNCE_MS = 750L
         private const val EXPIRY_SWEEP_MS = 60_000L
 
+        private const val EXTRA_REASON = "reason"
+
         /**
-         * Starts the service. Android 12+ refuses to start a foreground service from the
-         * background except in exempt cases (boot, a visible activity, a notification action);
-         * then the reconcile scan on the next app start covers the gap.
+         * Starts the service; [reason] is logged. Android 12+ refuses to start a foreground
+         * service from the background except in exempt cases (boot, package replaced, a visible
+         * activity, a notification action, an app exempt from battery optimisation). Refusals are
+         * logged; the media trigger, the safety-net job and the next app start try again.
          */
-        fun start(context: Context): Boolean = try {
-            ContextCompat.startForegroundService(context, Intent(context, SyncService::class.java))
+        fun start(context: Context, reason: String): Boolean = try {
+            Log.i(TAG, "SyncService start requested: $reason")
+            ContextCompat.startForegroundService(
+                context,
+                Intent(context, SyncService::class.java).putExtra(EXTRA_REASON, reason),
+            )
             true
         } catch (e: IllegalStateException) {
-            Log.w(TAG, "cannot start the sync service now", e)
+            Log.w(TAG, "SyncService start refused ($reason): ${e.javaClass.simpleName}: ${e.message}")
             false
         } catch (e: SecurityException) {
-            Log.w(TAG, "cannot start the sync service", e)
+            Log.w(TAG, "SyncService start refused ($reason)", e)
             false
         }
 
-        fun stop(context: Context) {
+        fun stop(context: Context, reason: String) {
+            Log.i(TAG, "SyncService stop requested: $reason")
             context.stopService(Intent(context, SyncService::class.java))
         }
     }

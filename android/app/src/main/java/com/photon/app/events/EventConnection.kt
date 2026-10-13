@@ -1,15 +1,14 @@
 package com.photon.app.events
 
+import android.os.SystemClock
 import android.util.Log
 import com.photon.app.core.Backoff
 import com.photon.app.core.NetworkMonitor
 import com.photon.app.data.db.PhotonDatabase
 import com.photon.app.net.ApiException
-import com.photon.app.net.ErrorKind
 import com.photon.app.net.TokenRefresher
 import com.photon.app.net.TokenStore
 import com.photon.app.receive.ReceivePipeline
-import com.photon.app.session.EndReason
 import com.photon.app.session.SessionManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -78,20 +77,29 @@ class EventConnection(
 
     private suspend fun runLoop() {
         var attempt = 0
+        val closes = CloseHandler(
+            refresh = { refresher.refresh(it) },
+            stillMember = { sessions().isStillMember() },
+            resync = { eventSync.resync() },
+            endSession = { sessions().endLocally(it) },
+            loginRequired = onLoginRequired,
+        )
         try {
             while (true) {
                 if (db.sessions().get() == null) return
+                if (!tokens.signedIn.value) return stopForLogin()
                 stateFlow.value = ConnectionState.CONNECTING
 
                 // Catch up first: covers a cold start or a dropped push before the socket is up.
+                // Any failure here is transient for the connection: only the refresher may
+                // decide that the login is over.
                 try {
                     eventSync.catchUp()
-                } catch (e: IOException) {
-                    waitBeforeRetry(attempt++)
-                    continue
-                } catch (e: ApiException) {
-                    if (e.kind == ErrorKind.AUTH) return stopForLogin()
-                    waitBeforeRetry(attempt++, e.retryAfterMs)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "catch-up failed, retrying: ${e.message}")
+                    waitBeforeRetry(attempt++, (e as? ApiException)?.retryAfterMs)
                     continue
                 }
 
@@ -105,8 +113,13 @@ class EventConnection(
                 } catch (e: IOException) {
                     waitBeforeRetry(attempt++)
                     continue
-                } ?: return stopForLogin()
+                }
+                if (token == null) {
+                    onLoginRequired()
+                    return stopForLogin()
+                }
 
+                val openedAt = SystemClock.elapsedRealtime()
                 val outcome = WsSession(
                     client = client,
                     url = wsUrl,
@@ -116,41 +129,16 @@ class EventConnection(
                         frame.event?.let { pipeline.handle(s.sessionId, it) }
                     },
                 ).run()
-                if (outcome.wasReady) attempt = 0
-                Log.i(TAG, "socket closed: code=${outcome.closeCode} error=${outcome.lastErrorCode} ${outcome.failure?.message.orEmpty()}")
+                // Backoff resets only after a connection that stayed up, so a server closing every
+                // socket after a few seconds (1011) gets backoff, not a reconnect storm.
+                val stable = outcome.wasReady && SystemClock.elapsedRealtime() - openedAt >= STABLE_CONNECTION_MS
+                if (stable) attempt = 0
+                Log.i(TAG, "socket closed: code=${outcome.closeCode} error=${outcome.lastErrorCode} stable=$stable ${outcome.failure?.message.orEmpty()}")
 
-                when (CloseCodes.actionFor(outcome.closeCode)) {
-                    WsAction.REFRESH_AND_RECONNECT -> {
-                        val fresh = try {
-                            refresher.refresh(token)
-                        } catch (e: IOException) {
-                            waitBeforeRetry(attempt++)
-                            continue
-                        }
-                        if (fresh == null) return stopForLogin()
-                    }
-                    WsAction.RELOGIN -> {
-                        tokens.clear()
-                        onLoginRequired()
-                        return stopForLogin()
-                    }
-                    WsAction.STOP_NOT_MEMBER -> {
-                        sessions().endLocally(EndReason.KICKED)
-                        return
-                    }
-                    WsAction.RESYNC_AND_RECONNECT -> {
-                        try {
-                            eventSync.resync()
-                        } catch (e: Exception) {
-                            if (e is CancellationException) throw e
-                            waitBeforeRetry(attempt++)
-                        }
-                    }
-                    WsAction.SESSION_ENDED -> {
-                        sessions().endLocally(EndReason.ENDED)
-                        return
-                    }
-                    WsAction.RECONNECT_WITH_BACKOFF -> waitBeforeRetry(attempt++)
+                when (closes.onClose(outcome.closeCode, token, stable)) {
+                    NextStep.RECONNECT_NOW -> Unit
+                    NextStep.RECONNECT_AFTER_BACKOFF -> waitBeforeRetry(attempt++)
+                    NextStep.STOP -> return
                 }
             }
         } finally {
@@ -170,12 +158,13 @@ class EventConnection(
         }
     }
 
-    /** Tokens are gone (the refresher or a 4401 cleared them); the UI shows the login screen. */
+    /** Tokens are gone (the refresh endpoint refused them); the UI shows the login screen. */
     private fun stopForLogin() {
         Log.w(TAG, "event connection stopped: login required")
     }
 
     private companion object {
         const val TAG = "PHOTON"
+        const val STABLE_CONNECTION_MS = 30_000L
     }
 }

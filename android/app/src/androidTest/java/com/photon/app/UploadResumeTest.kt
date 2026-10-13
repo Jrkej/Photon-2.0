@@ -141,6 +141,7 @@ class UploadResumeTest {
             sessions = { error("no session errors expected") },
             retry = RetryPolicy(Backoff(baseMs = 10, capMs = 50)),
             clock = Clock.SYSTEM,
+            signedIn = { true },
         )
     }
 

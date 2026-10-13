@@ -1,9 +1,12 @@
 package com.photon.app.ui
 
 import android.Manifest
+import android.annotation.SuppressLint
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.os.PowerManager
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -26,6 +29,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -61,28 +65,6 @@ import com.photon.app.data.db.ReceivedPhoto
 import com.photon.app.data.db.SessionState
 import com.photon.app.data.db.UploadState
 import com.photon.app.events.ConnectionState
-
-@Composable
-fun LoginScreen(vm: AppViewModel, onOpenUrl: (Uri) -> Unit) {
-    val ui by vm.ui.collectAsStateWithLifecycle()
-    Column(
-        Modifier.fillMaxSize().padding(32.dp),
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Text(stringResource(R.string.app_name), style = MaterialTheme.typography.displayMedium, fontWeight = FontWeight.Bold)
-        Spacer(Modifier.height(12.dp))
-        Text(stringResource(R.string.login_title), style = MaterialTheme.typography.bodyLarge)
-        Spacer(Modifier.height(32.dp))
-        Button(onClick = { vm.startLogin(onOpenUrl) }, enabled = !ui.busy, modifier = Modifier.testTag("login")) {
-            Text(stringResource(R.string.login_button))
-        }
-        if (ui.loginInProgress) {
-            Spacer(Modifier.height(12.dp))
-            Text(stringResource(R.string.login_in_progress), style = MaterialTheme.typography.bodySmall)
-        }
-    }
-}
 
 @Composable
 fun HomeScreen(vm: AppViewModel, onScan: () -> Unit) {
@@ -140,6 +122,7 @@ fun SessionScreen(vm: AppViewModel, session: SessionState) {
     ) {
         item { Spacer(Modifier.height(8.dp)) }
         item { SyncCard(session, connection, enabled = !ui.busy, onPausedChange = vm::setPaused) }
+        item { BatteryOptimizationCard() }
         item { PermissionCards(vm) }
         item { InviteCard(session, onRotate = vm::rotateInvites, busy = ui.busy) }
 
@@ -444,3 +427,37 @@ fun PermissionCards(
         }
     }
 }
+
+/**
+ * Motorola and other vendors stop background work aggressively. Continuous sync is the app's
+ * core function, so it asks to be exempt from battery optimisation; the exemption also lets the
+ * background triggers restart SyncService after the process was killed.
+ */
+@SuppressLint("BatteryLife")
+@Composable
+fun BatteryOptimizationCard() {
+    val context = LocalContext.current
+    var exempt by remember { mutableStateOf(isIgnoringBatteryOptimizations(context)) }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { exempt = isIgnoringBatteryOptimizations(context) }
+    if (exempt) return
+    Card(
+        Modifier.fillMaxWidth().testTag("battery-optimization"),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(stringResource(R.string.battery_title), style = MaterialTheme.typography.titleMedium)
+            Text(stringResource(R.string.battery_body), style = MaterialTheme.typography.bodyMedium)
+            Button(onClick = {
+                val request = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:${context.packageName}"))
+                try {
+                    context.startActivity(request)
+                } catch (e: ActivityNotFoundException) {
+                    context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+                }
+            }) { Text(stringResource(R.string.battery_allow)) }
+        }
+    }
+}
+
+private fun isIgnoringBatteryOptimizations(context: android.content.Context): Boolean =
+    context.getSystemService(PowerManager::class.java)?.isIgnoringBatteryOptimizations(context.packageName) ?: true

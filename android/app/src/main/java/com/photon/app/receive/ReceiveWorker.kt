@@ -8,6 +8,7 @@ import com.photon.app.data.db.ReceiveState
 import com.photon.app.graph
 import com.photon.app.net.ApiException
 import com.photon.app.net.ErrorCodes
+import com.photon.app.net.ErrorKind
 import com.photon.app.sync.PhotonWorker
 import java.io.IOException
 
@@ -94,6 +95,8 @@ internal suspend fun runCatchingDownload(
             graph.pipeline.markGone(sessionId, sha256, recalled = false)
             ListenableWorker.Result.success()
         }
+        // A 401 that survived the interceptor's refresh is transient while still signed in.
+        e.kind == ErrorKind.AUTH && graph.tokens.signedIn.value -> ListenableWorker.Result.retry()
         e.retryable -> ListenableWorker.Result.retry()
         else -> ListenableWorker.Result.failure()
     }

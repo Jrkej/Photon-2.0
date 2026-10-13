@@ -22,6 +22,8 @@ playServicesCronet = "18.1.0"
 cronetApi = "119.6045.31"
 firebaseBom = "33.5.1"
 zxingCore = "3.5.3"
+credentials = "1.3.0"
+googleId = "1.1.1"
 zxingEmbedded = "4.3.0"
 
 junit = "4.13.2"
@@ -73,6 +75,10 @@ play-services-cronet = { module = "com.google.android.gms:play-services-cronet",
 
 firebase-bom = { module = "com.google.firebase:firebase-bom", version.ref = "firebaseBom" }
 firebase-messaging = { module = "com.google.firebase:firebase-messaging" }
+
+credentials-core = { module = "androidx.credentials:credentials", version.ref = "credentials" }
+credentials-playservices = { module = "androidx.credentials:credentials-play-services-auth", version.ref = "credentials" }
+googleid = { module = "com.google.android.libraries.identity.googleid:googleid", version.ref = "googleId" }
 
 zxing-core = { module = "com.google.zxing:core", version.ref = "zxingCore" }
 zxing-android-embedded = { module = "com.journeyapps:zxing-android-embedded", version.ref = "zxingEmbedded" }

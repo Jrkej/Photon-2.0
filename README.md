@@ -4,6 +4,9 @@ PHOTON syncs photos between the galleries of everyone in a live session: when on
 
 - [Design.md](Design.md) is the system design: the architecture, protocols, data model and the guarantees the server makes.
 - [implementation.md](implementation.md) is the build plan, phase by phase, with every decision the design left open.
+- [code.md](code.md) is a map of the repository: what every directory and file is for.
+- [prehost.md](prehost.md) is the checklist of everything to do before hosting PHOTON.
+- [local.md](local.md) explains how to test locally on an Android phone: which scripts to run, where, and what to check.
 
 ## What is here
 
@@ -24,9 +27,11 @@ PHOTON syncs photos between the galleries of everyone in a live session: when on
 ```bash
 scripts/dev-deps.sh                     # builds Redis 7.2 into .devtools/ (Postgres comes from a pip wheel)
 python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
-.venv/bin/pytest -q                     # 137 tests: unit, integration, end to end
+.venv/bin/pytest -q                     # 153 tests: unit, integration, end to end
 .venv/bin/photon-dev                    # API on :8080 (Auth + orchestrator), image server on :8081
 ```
+
+On an Android phone over USB: run `scripts/phone-backend.sh` in one terminal and `scripts/phone-install.sh` in another. The second script forwards the ports with `adb reverse`, then builds, installs and opens the debug app. If photos stop arriving, run `scripts/phone-diagnose.sh`. The usual cause is that the backend has stopped, or that the `adb reverse` forwarding was lost after the cable was replugged or adb restarted; `scripts/phone-install.sh --reverse` restores it.
 
 `photon-dev` starts Redis, an embedded Postgres, runs the migrations, generates keys into `.devdata/keys`, and serves everything over plain HTTP with the dev login provider. It is for development only. Use `--host 0.0.0.0` to reach it from an emulator (`http://10.0.2.2:8080` on Android).
 
@@ -75,7 +80,8 @@ Every setting is an environment variable `PHOTON_<NAME>` (see [src/photon/common
 | `PHOTON_PUBLIC_BASE_URL`, `PHOTON_IMAGE_BASE_URL` | Public URLs (invite links, upload URLs) |
 | `PHOTON_ORCHESTRATOR_INTERNAL_URL`, `PHOTON_IMAGESERVER_INTERNAL_URL` | Service-to-service URLs |
 | `PHOTON_STORAGE_ROOT` | Image server data directory (one filesystem) |
-| `PHOTON_GOOGLE_CLIENT_ID`, `PHOTON_GOOGLE_CLIENT_SECRET` | Google sign-in |
+| `PHOTON_GOOGLE_CLIENT_ID`, `PHOTON_GOOGLE_CLIENT_SECRET` | Google sign-in. The Android app gets the client id from `GET /v1/auth/config`; the secret is only needed for the browser flow |
+| `PHOTON_GITHUB_CLIENT_ID`, `PHOTON_GITHUB_CLIENT_SECRET` | GitHub sign-in (a GitHub OAuth App whose callback URL is `<API base>/v1/auth/oauth/return`) |
 | `PHOTON_OAUTH_REDIRECT_URIS` | Registered redirect URIs, matched exactly |
 | `PHOTON_FCM_CREDENTIALS_FILE` | Push hints to Android devices through FCM (needs the `push` extra) |
 | `PHOTON_APNS_KEY_FILE`, `PHOTON_APNS_KEY_ID`, `PHOTON_APNS_TEAM_ID`, `PHOTON_APNS_TOPIC` | Background pushes to iOS devices through APNs (needs the `push` extra) |

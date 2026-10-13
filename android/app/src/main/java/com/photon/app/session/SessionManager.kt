@@ -1,6 +1,7 @@
 package com.photon.app.session
 
 import android.content.Context
+import android.util.Log
 import androidx.room.withTransaction
 import com.photon.app.core.Clock
 import com.photon.app.core.MediaCache
@@ -76,7 +77,7 @@ class SessionManager(
                 if (info.member_ids.isNotEmpty()) db.sessions().replaceMembers(info.session_id, info.member_ids)
                 return@withLock
             }
-            if (previous != null) clearLocal()
+            if (previous != null) clearLocal("replaced by ${info.session_id}")
             val state = SessionState(
                 sessionId = info.session_id,
                 userId = tokens.userId.orEmpty(),
@@ -106,13 +107,14 @@ class SessionManager(
         } catch (e: ApiException) {
             if (!onSessionError(e)) throw e
         }
-        startSyncing()
+        startSyncing("session entered")
         return db.sessions().get() ?: throw IllegalStateException("session ended while joining")
     }
 
     /** Starts (or restarts) everything that runs while a session is active. */
-    fun startSyncing() {
-        SyncService.start(context)
+    fun startSyncing(reason: String) {
+        SyncService.start(context, reason)
+        scheduler.ensureBackgroundTriggers()
         scheduler.enqueueReconcile()
         scheduler.enqueueUploads()
     }
@@ -122,6 +124,21 @@ class SessionManager(
         // Already gone on the server: leaving locally is all that's left.
         JoinConflict.leaveTolerant { api.leave(s.sessionId) }
         endLocally(EndReason.LEFT)
+    }
+
+    /**
+     * Whether the server still has this user in the local session: true or false, or null when
+     * it can't be asked right now. Used to confirm a 4403 or 4410 close before tearing down.
+     */
+    suspend fun isStillMember(): Boolean? {
+        val s = db.sessions().get() ?: return false
+        return try {
+            api.currentSession()?.session_id == s.sessionId
+        } catch (e: IOException) {
+            null
+        } catch (e: ApiException) {
+            null
+        }
     }
 
     /** The session the server has this user in (`GET /v1/sessions/current`), or null. */
@@ -259,7 +276,7 @@ class SessionManager(
             if (s.userId.isNotEmpty() && uid != null && s.userId != uid) {
                 endLocally(EndReason.SIGNED_OUT)
             } else {
-                startSyncing()
+                startSyncing("signed in")
                 scheduler.enqueueCatchUp()
             }
         }
@@ -287,17 +304,18 @@ class SessionManager(
         val ended = withContext(NonCancellable) {
             mutex.withLock {
                 if (db.sessions().get() == null) return@withLock false
-                clearLocal()
+                Log.i("PHOTON", "ending the local session: $reason")
+                clearLocal(reason.name)
                 true
             }
         }
         if (ended) endedFlow.tryEmit(reason)
     }
 
-    private suspend fun clearLocal() {
+    private suspend fun clearLocal(reason: String) {
         scheduler.cancelSessionWork()
         connection().stopAll()
-        SyncService.stop(context)
+        SyncService.stop(context, "session over: $reason")
         db.withTransaction {
             db.sessions().clear()
             db.sessions().clearAllMembers()

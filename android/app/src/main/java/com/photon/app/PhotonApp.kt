@@ -6,7 +6,8 @@ import android.util.Log
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
-import com.photon.app.auth.LoginManager
+import com.photon.app.auth.AuthService
+import com.photon.app.auth.BrowserOAuth
 import com.photon.app.core.Backoff
 import com.photon.app.core.Clock
 import com.photon.app.core.MediaCache
@@ -65,7 +66,7 @@ val Context.graph: AppGraph get() = (applicationContext as PhotonApp).graph
 class AppGraph(private val app: Context) {
     /** Long-lived background work. A failure is logged and the job ends; it never takes the process down. */
     val appScope = CoroutineScope(
-        SupervisorJob() + Dispatchers.Default + CoroutineExceptionHandler { _, e -> Log.e("PHOTON", "background job failed", e) },
+        SupervisorJob() + Dispatchers.Default + CoroutineExceptionHandler { _, e -> Log.e(TAG, "background job failed", e) },
     )
     val clock: Clock = Clock.SYSTEM
 
@@ -122,15 +123,18 @@ class AppGraph(private val app: Context) {
             sessions = { sessions },
             retry = retryPolicy,
             clock = clock,
+            signedIn = { tokens.signedIn.value },
         )
     }
     val fetcher by lazy { PhotoFetcher(db, imageApi, cache, GallerySaver(app), clock) }
-    val login by lazy {
-        LoginManager(api, tokens, BuildConfig.OAUTH_PROVIDER, BuildConfig.OAUTH_REDIRECT_URI) { url ->
+    /** Browser OAuth (GitHub). The redirect is photon://auth/cb in debug, the App Link in release. */
+    val browserOAuth by lazy {
+        BrowserOAuth(api, tokens, BuildConfig.OAUTH_REDIRECT_URI) { url ->
             if (BuildConfig.REWRITE_LOCAL_URLS) LocalUrls.rebaseLocalhost(url, apiBase) else url
         }
     }
     val push by lazy { PushRegistrar(app, api, tokens) }
+    val auth by lazy { AuthService(api, tokens) }
 
     /** `{API_BASE with ws/wss}/v1/ws`. */
     fun webSocketUrl(): String {
@@ -148,10 +152,18 @@ class AppGraph(private val app: Context) {
         }
         appScope.launch {
             scheduler.enqueuePurgeNow()
-            if (db.sessions().get() != null && tokens.signedIn.value) {
+            val hasSession = db.sessions().get() != null
+            val signedIn = tokens.signedIn.value
+            Log.i(TAG, "process start: session=$hasSession signedIn=$signedIn")
+            if (hasSession && signedIn) {
+                scheduler.ensureBackgroundTriggers()
                 scheduler.enqueueCatchUp()
                 scheduler.enqueueReconcile()
                 scheduler.enqueueUploads()
+                // Allowed when the process starts for an activity, a boot or an update, or when the
+                // app is exempt from battery optimisation; otherwise refused and logged, and
+                // onForeground or the background triggers try again.
+                SyncService.start(app, "process start")
             }
         }
     }
@@ -164,7 +176,8 @@ class AppGraph(private val app: Context) {
         appScope.launch {
             if (inForeground && db.sessions().get() != null && tokens.signedIn.value) {
                 // Foreground: starting the service is allowed now even if it was refused before.
-                SyncService.start(app)
+                SyncService.start(app, "app in foreground")
+                scheduler.ensureBackgroundTriggers()
                 connection.acquire(FOREGROUND)
             }
         }
@@ -175,12 +188,15 @@ class AppGraph(private val app: Context) {
         connection.release(FOREGROUND)
     }
 
+    /** The refresh endpoint refused the refresh token: the only path that ends a login on its own. */
     private fun onSignedOut() {
+        Log.w(TAG, "signed out by the server; stopping sync until the next login")
         connection.stopAll()
-        SyncService.stop(app)
+        SyncService.stop(app, "signed out (refresh refused)")
     }
 
     private companion object {
+        const val TAG = "PHOTON"
         const val FOREGROUND = "foreground"
     }
 }

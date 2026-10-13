@@ -63,6 +63,8 @@ class Uploader(
     private val sessions: () -> SessionManager,
     private val retry: RetryPolicy,
     private val clock: Clock,
+    /** False once the refresh endpoint has refused the login; until then a 401 is transient. */
+    private val signedIn: () -> Boolean = { true },
 ) {
     /** What happens to the queue after one row. */
     private sealed interface Step {
@@ -363,7 +365,9 @@ class Uploader(
             defer(r, wait, e.code)
             Step.PauseQueue(clock.nowMs() + wait)
         }
-        e.kind == ErrorKind.AUTH -> Step.Stop
+        // The interceptor already tried a refresh. Signed out: wait for the next login, which
+        // restarts the queue. Still signed in: transient, retry with backoff.
+        e.kind == ErrorKind.AUTH -> if (signedIn()) Step.RetryLater else Step.Stop
         e.retryable || e.kind == ErrorKind.UNAVAILABLE -> Step.RetryLater
         else -> settle(r, UploadState.FAILED, e.code)
     }

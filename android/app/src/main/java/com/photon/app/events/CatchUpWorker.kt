@@ -39,7 +39,9 @@ class CatchUpWorker(context: Context, params: WorkerParameters) : PhotonWorker(c
         } catch (e: IOException) {
             Result.retry()
         } catch (e: ApiException) {
-            if (e.retryable || e.kind == ErrorKind.UNAVAILABLE) Result.retry() else Result.failure()
+            val transient = e.retryable || e.kind == ErrorKind.UNAVAILABLE ||
+                (e.kind == ErrorKind.AUTH && graph.tokens.signedIn.value)
+            if (transient) Result.retry() else Result.failure()
         }
     }
 

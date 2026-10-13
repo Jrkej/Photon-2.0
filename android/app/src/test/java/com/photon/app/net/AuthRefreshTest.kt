@@ -25,6 +25,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.io.IOException
 import java.util.concurrent.atomic.AtomicInteger
 
 class FakeTokenStore(access: String?, refresh: String?, expiresAt: Long = 0) : TokenStore {
@@ -39,6 +40,7 @@ class FakeTokenStore(access: String?, refresh: String?, expiresAt: Long = 0) : T
     override fun save(pair: TokenPair) {
         accessToken = pair.access_token
         if (pair.refresh_token.isNotEmpty()) refreshToken = pair.refresh_token
+        if (pair.user_id.isNotEmpty()) userId = pair.user_id
         accessExpiresAtMs = pair.access_expires_at_ms
         flow.value = true
     }
@@ -94,14 +96,37 @@ class TokenRefresherTest {
     }
 
     @Test
-    fun retryableRefreshFailureKeepsTheTokens() = runTest {
-        val store = FakeTokenStore("old", "r1")
-        val refresher = TokenRefresher(store, refreshCall = {
-            throw ErrorMapper.map(429, Error(code = "RATE_LIMITED", retryable = true).encode(), null)
-        }, onSignedOut = {})
-        val result = runCatching { refresher.refresh("old") }
-        assertTrue(result.exceptionOrNull() is ApiException)
-        assertEquals("r1", store.refreshToken)
+    fun onlyA401FromTheRefreshEndpointSignsOut() {
+        assertTrue(SignOutRules.isRefreshRefused(ErrorMapper.map(401, Error(code = "UNAUTHENTICATED").encode(), null)))
+        assertTrue(SignOutRules.isRefreshRefused(ErrorMapper.map(401, null, null)))
+        for (status in listOf(400, 403, 404, 409, 429, 500, 502, 503)) {
+            assertFalse("$status", SignOutRules.isRefreshRefused(ErrorMapper.map(status, Error(code = "X").encode(), null)))
+        }
+        assertFalse(SignOutRules.isRefreshRefused(IOException("timeout")))
+        assertFalse(SignOutRules.isRefreshRefused(IllegalStateException("bad proto")))
+    }
+
+    @Test
+    fun anyOtherRefreshFailureKeepsTheTokensAndIsReportedAsTransient() = runTest {
+        val failures: List<() -> Nothing> = listOf(
+            { throw ErrorMapper.map(429, Error(code = "RATE_LIMITED", retryable = true).encode(), null) },
+            { throw ErrorMapper.map(500, Error(code = "INTERNAL", retryable = false).encode(), null) },
+            { throw ErrorMapper.map(400, Error(code = "INVALID_REQUEST").encode(), null) },
+            { throw ErrorMapper.map(404, null, null) },
+            { throw IOException("connection reset") },
+            { throw IllegalStateException("unparseable body") },
+        )
+        for (fail in failures) {
+            val store = FakeTokenStore("old", "r1")
+            var signedOut = false
+            val refresher = TokenRefresher(store, refreshCall = { fail() }, onSignedOut = { signedOut = true })
+            val thrown = runCatching { refresher.refresh("old") }.exceptionOrNull()
+            assertTrue("$thrown", thrown is IOException)
+            assertEquals("r1", store.refreshToken)
+            assertEquals("old", store.accessToken)
+            assertTrue(store.signedIn.value)
+            assertFalse(signedOut)
+        }
     }
 
     @Test
@@ -124,6 +149,9 @@ class AuthInterceptorTest {
     private lateinit var server: MockWebServer
     private val refreshes = AtomicInteger()
 
+    /** What the refresh endpoint answers: 200 with a new pair, or this status. */
+    @Volatile private var refreshStatus = 200
+
     @Before
     fun setUp() {
         server = MockWebServer()
@@ -134,7 +162,11 @@ class AuthInterceptorTest {
                     request.path == "/v1/auth/refresh" -> {
                         refreshes.incrementAndGet()
                         Thread.sleep(100)
-                        proto(TokenPair(access_token = "fresh", refresh_token = "r2", user_id = "alice").encode())
+                        when (refreshStatus) {
+                            200 -> proto(TokenPair(access_token = "fresh", refresh_token = "r2", user_id = "alice").encode())
+                            401 -> proto(Error(code = "UNAUTHENTICATED").encode(), 401)
+                            else -> proto(Error(code = "BUSY", retryable = true).encode(), refreshStatus)
+                        }
                     }
                     auth == "Bearer fresh" -> proto(SessionInfo(session_id = "s1").encode())
                     auth == "Bearer upload-token" -> MockResponse().setResponseCode(204)
@@ -166,6 +198,40 @@ class AuthInterceptorTest {
         assertEquals(1, refreshes.get())
         assertEquals("fresh", store.accessToken)
         assertEquals("r2", store.refreshToken)
+    }
+
+    @Test
+    fun aFailingRefreshEndpointFailsTheCallButKeepsTheLogin() = runBlocking {
+        refreshStatus = 503
+        val store = FakeTokenStore("stale", "r1")
+        var signedOut = false
+        lateinit var api: PhotonApi
+        val refresher = TokenRefresher(store, refreshCall = { api.refresh(it) }, onSignedOut = { signedOut = true })
+        val client = OkHttpClient.Builder().addInterceptor(AuthInterceptor(refresher)).build()
+        api = PhotonApi(server.url("/"), client, OkHttpClient())
+
+        val thrown = runCatching { api.rotateInvites("s1") }.exceptionOrNull()
+
+        assertTrue("$thrown", thrown is IOException)
+        assertFalse(signedOut)
+        assertEquals("r1", store.refreshToken)
+        assertTrue(store.signedIn.value)
+    }
+
+    @Test
+    fun aRefusedRefreshSignsOut() = runBlocking {
+        refreshStatus = 401
+        val store = FakeTokenStore("stale", "r1")
+        var signedOut = false
+        lateinit var api: PhotonApi
+        val refresher = TokenRefresher(store, refreshCall = { api.refresh(it) }, onSignedOut = { signedOut = true })
+        val client = OkHttpClient.Builder().addInterceptor(AuthInterceptor(refresher)).build()
+        api = PhotonApi(server.url("/"), client, OkHttpClient())
+
+        runCatching { api.rotateInvites("s1") }
+
+        assertTrue(signedOut)
+        assertNull(store.refreshToken)
     }
 
     @Test

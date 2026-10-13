@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     dev_redirect_uris: list[str] = ["photon://auth/cb"]
     google_client_id: str = ""
     google_client_secret: str = ""
+    github_client_id: str = ""  # a GitHub OAuth App; its callback URL is <api_base_url>/v1/auth/oauth/return
+    github_client_secret: str = ""
     android_cert_sha256: list[str] = []
     ios_app_id: str = "TEAMID.com.photon.app"
 

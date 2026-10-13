@@ -19,8 +19,15 @@ def make_client(url: str, max_connections: int | None = None) -> Redis:
 
 
 def make_blocking_client(url: str, max_connections: int) -> Redis:
-    """For XREAD BLOCK: one connection per open WebSocket, waiting (not failing) when the pool is exhausted."""
-    pool = BlockingConnectionPool.from_url(url, max_connections=max_connections, timeout=5, decode_responses=True)
+    """For XREAD BLOCK: one connection per open WebSocket, waiting (not failing) when the pool is exhausted.
+
+    No socket read timeout: redis-py's default (5 s) would cut every XREAD BLOCK longer than that and drop the
+    WebSocket. A blocked read ends with its BLOCK time or with its socket; TCP keepalive finds dead peers.
+    """
+    pool = BlockingConnectionPool.from_url(
+        url, max_connections=max_connections, timeout=5, decode_responses=True,
+        socket_timeout=None, socket_connect_timeout=5, socket_keepalive=True,
+    )
     return Redis(connection_pool=pool)
 
 

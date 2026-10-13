@@ -332,3 +332,35 @@ class ServerFrame(_message.Message):
     pong: int
     ready_cursor: str
     def __init__(self, event: _Optional[_Union[PhotoEvent, _Mapping]] = ..., error: _Optional[_Union[Error, _Mapping]] = ..., pong: _Optional[int] = ..., ready_cursor: _Optional[str] = ...) -> None: ...
+
+class AuthConfig(_message.Message):
+    __slots__ = ("google_client_id", "dev_login", "github_login")
+    GOOGLE_CLIENT_ID_FIELD_NUMBER: _ClassVar[int]
+    DEV_LOGIN_FIELD_NUMBER: _ClassVar[int]
+    GITHUB_LOGIN_FIELD_NUMBER: _ClassVar[int]
+    google_client_id: str
+    dev_login: bool
+    github_login: bool
+    def __init__(self, google_client_id: _Optional[str] = ..., dev_login: _Optional[bool] = ..., github_login: _Optional[bool] = ...) -> None: ...
+
+class NonceResponse(_message.Message):
+    __slots__ = ("nonce", "expires_at_ms")
+    NONCE_FIELD_NUMBER: _ClassVar[int]
+    EXPIRES_AT_MS_FIELD_NUMBER: _ClassVar[int]
+    nonce: str
+    expires_at_ms: int
+    def __init__(self, nonce: _Optional[str] = ..., expires_at_ms: _Optional[int] = ...) -> None: ...
+
+class GoogleSignInRequest(_message.Message):
+    __slots__ = ("id_token", "nonce")
+    ID_TOKEN_FIELD_NUMBER: _ClassVar[int]
+    NONCE_FIELD_NUMBER: _ClassVar[int]
+    id_token: str
+    nonce: str
+    def __init__(self, id_token: _Optional[str] = ..., nonce: _Optional[str] = ...) -> None: ...
+
+class DevLoginRequest(_message.Message):
+    __slots__ = ("username",)
+    USERNAME_FIELD_NUMBER: _ClassVar[int]
+    username: str
+    def __init__(self, username: _Optional[str] = ...) -> None: ...

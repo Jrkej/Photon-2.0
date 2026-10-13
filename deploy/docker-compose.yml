@@ -18,7 +18,10 @@ x-app: &app
     PHOTON_IMAGE_BASE_URL: https://${PHOTON_IMAGE_HOST}
     PHOTON_ORCHESTRATOR_INTERNAL_URL: http://orchestrator:8080
     PHOTON_IMAGESERVER_INTERNAL_URL: http://imageserver:8081
-    PHOTON_TRUSTED_PROXIES: '["caddy"]'
+    # Caddy has a fixed address (see networks below). Both uvicorn and the per-IP rate limits trust
+    # X-Forwarded-For only from it; a host name would never match a peer address.
+    PHOTON_TRUSTED_PROXIES: '["172.30.0.10"]'
+    FORWARDED_ALLOW_IPS: 172.30.0.10
   volumes:
     - ./certs/ca.pem:/certs/ca.pem:ro
   depends_on:
@@ -126,6 +129,9 @@ services:
   caddy:
     image: caddy:2.8
     restart: unless-stopped
+    networks:
+      default:
+        ipv4_address: 172.30.0.10
     ports: ["80:80", "443:443", "443:443/udp"]
     env_file: .env
     volumes:
@@ -153,6 +159,12 @@ secrets:
   svc-imageserver-key: {file: ./keys/svc-imageserver.pem}
   svc-imageserver-pub: {file: ./keys/svc-imageserver.pub.pem}
   svc-imageserver-kid: {file: ./keys/svc-imageserver.kid}
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
 
 volumes:
   redis-data:
