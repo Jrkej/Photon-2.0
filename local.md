@@ -39,7 +39,9 @@ It forwards ports 8080 and 8081 to the phone over USB (`adb reverse`), then buil
 | `scripts/phone-install.sh` | First time, and after every code change |
 | `scripts/phone-install.sh --reverse` | After replugging the cable or restarting the computer: restores the port forwarding, with no rebuild |
 | `scripts/phone-install.sh --logs` | The same as the first, then follows the app's log |
-| `ANDROID_SERIAL=<serial> scripts/phone-install.sh` | Several phones connected (serials from `adb devices`) |
+| `scripts/phone-install.sh --all` | Several phones connected: set up all of them (see [Two phones](#two-or-more-phones)) |
+| `ANDROID_SERIAL=<serial> scripts/phone-install.sh` | Several phones connected: set up just one (serials from `adb devices`) |
+| `scripts/phone-install.sh --lan <address>` | Phones on Wi-Fi instead of USB (see [Over Wi-Fi](#over-wi-fi-a-phone-that-isnt-plugged-in)) |
 
 ## On the phone
 
@@ -74,6 +76,44 @@ Leave `listen` running: every photo the phone shares is printed and saved to `./
 | Leave | Tap Leave in the app | Terminal 3 prints the member leaving; sharing stops |
 
 Other `photon-cli` commands: `info`, `snapshot`, `catchup`, `recall <sha>`, `download <sha>`, `leave`, `end`.
+
+## Two (or more) phones
+
+### Both on USB (simplest)
+
+Plug both phones into this computer, accept the USB debugging prompt on each, and keep the backend from terminal 1 running. Then:
+
+```bash
+scripts/phone-install.sh --all            # forward the ports, build once, install and open the app on every phone
+scripts/phone-install.sh --reverse --all  # after replugging a cable
+```
+
+1. **Phone A:** sign in (Developer sign-in, for example as `alice`) and create a session. The screen shows the code and a QR code.
+2. **Phone B:** sign in with a **different** name (for example `bob`) and join with the code, or scan the QR code with the camera.
+3. On both phones, allow photos with **Allow all**, and notifications.
+
+What to test:
+
+| Test | Expected |
+| --- | --- |
+| Take a photo on A (A open or in the background) | B shows the thumbnail within a few seconds, then saves the original under **Pictures/PHOTON** |
+| Take a photo on B | The same on A |
+| Add the computer as a third member (terminal 3 above) | `listen` receives every photo both phones take |
+| Recall a photo on A | It disappears from B's PHOTON screen (the copy already saved to B's gallery stays; that's by design) |
+| A leaves or ends the session | B sees the member leave, or the session end |
+
+Diagnosing one phone of several: `ANDROID_SERIAL=<serial> scripts/phone-diagnose.sh` (serials from `adb devices`). The app log of each: `adb -s <serial> logcat -s PHOTON`.
+
+### Over Wi-Fi (a phone that isn't plugged in)
+
+Both phones and this computer must be on the same Wi-Fi. This exposes the development backend, which has no real sign-in, to your network, so only do it on a network you trust.
+
+1. Find this computer's Wi-Fi address: `ip route get 1.1.1.1` shows it after `src` (for example `10.81.65.165`). Ignore the `172.x` addresses from `hostname -I`; they are Docker's internal networks.
+2. **Terminal 1:** `scripts/phone-backend.sh --host 0.0.0.0 --public-host 10.81.65.165`
+3. On each phone, open `http://10.81.65.165:8080/healthz` in the browser. It must show `ok`. If it doesn't, open the ports (`sudo ufw allow 8080,8081/tcp`). If it still fails, the Wi-Fi keeps devices apart (common on campus and office networks); use USB instead.
+4. **Terminal 2:** `scripts/phone-install.sh --lan 10.81.65.165` (add `--all` if several phones are plugged in). It builds the app **for that address**, installs it on any phone that's plugged in, and prints the APK file for the others. Copy `android/app/build/outputs/apk/debug/app-debug.apk` to a phone that isn't plugged in and open it (allow "Install unknown apps"); it updates the existing app.
+
+Every phone in the session needs this Wi-Fi build. An app built by the plain `scripts/phone-install.sh` talks to `127.0.0.1`, which over Wi-Fi is the phone itself: the browser check passes, but the app says it can't reach the server. Developer sign-in works the same; GitHub and Google sign-in need their callback set up for this address, so stick to Developer sign-in here. If the computer's address changes (another network, or a reconnect), restart the backend and run step 4 again with the new address.
 
 ## If something doesn't arrive
 

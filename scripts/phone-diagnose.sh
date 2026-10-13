@@ -5,6 +5,7 @@
 #
 #   scripts/phone-diagnose.sh            print the report
 #   scripts/phone-diagnose.sh --watch    then follow the app's log live (take a photo with PHOTON in the background)
+#   ANDROID_SERIAL=<serial> scripts/phone-diagnose.sh   one phone of several
 set -uo pipefail
 
 PACKAGE=com.photon.app
@@ -14,6 +15,11 @@ WATCH=0
 [ "${1:-}" = "--watch" ] && WATCH=1
 
 state="$("$ADB" get-state 2>&1 | head -1)"
+if [[ "$state" == *"more than one"* ]]; then
+  echo "Several phones are connected. Pick one: ANDROID_SERIAL=<serial> $0"
+  "$ADB" devices -l | tail -n +2
+  exit 1
+fi
 if [ "$state" != "device" ]; then
   echo "Phone not ready: $state"
   echo "Unlock the phone and accept \"Allow USB debugging\" (tick \"Always allow from this computer\")."

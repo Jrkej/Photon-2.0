@@ -1,30 +1,53 @@
 #!/usr/bin/env bash
-# Terminal 2 of the USB phone setup: connects a phone on USB to the dev backend, then builds, installs and
-# starts the debug app. Start scripts/phone-backend.sh first.
+# Terminal 2 of the phone setup: connects phones to the dev backend, then builds, installs and starts the debug
+# app. Start scripts/phone-backend.sh first.
 #
-#   scripts/phone-install.sh             forward the ports, build, install, start the app
-#   scripts/phone-install.sh --reverse   only forward the ports again (needed after replugging the cable)
-#   scripts/phone-install.sh --logs      same as the first form, then follow the app's log
+#   scripts/phone-install.sh             one phone on USB: forward the ports, build, install, start the app
+#   scripts/phone-install.sh --all       every phone on USB (testing with two or more phones)
+#   scripts/phone-install.sh --reverse   only forward the ports again (after replugging); combine with --all
+#   scripts/phone-install.sh --logs      one phone: as the first form, then follow the app's log
+#   scripts/phone-install.sh --lan 192.168.1.20 [--all]
+#                                        Wi-Fi instead of USB: build for this computer's address, install on any
+#                                        phones plugged in now, and print the APK to copy to the others
 #
-# Several phones connected: ANDROID_SERIAL=<serial from `adb devices`> scripts/phone-install.sh
+# One phone of several: ANDROID_SERIAL=<serial from `adb devices`> scripts/phone-install.sh
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PACKAGE=com.photon.app
-API=http://127.0.0.1:8080
-IMAGE=http://127.0.0.1:8081
-WAIT_S="${PHONE_WAIT_S:-60}"
+APK="$ROOT/android/app/build/outputs/apk/debug/app-debug.apk"
 
 REVERSE_ONLY=0
 LOGS=0
-for arg in "$@"; do
-  case "$arg" in
+ALL=0
+LAN=""
+while [ $# -gt 0 ]; do
+  case "$1" in
     --reverse) REVERSE_ONLY=1 ;;
     --logs) LOGS=1 ;;
-    -h|--help) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *) echo "Unknown option: $arg (see --help)" >&2; exit 2 ;;
+    --all) ALL=1 ;;
+    --lan) shift; LAN="${1:-}"; [ -n "$LAN" ] || { echo "--lan needs this computer's address" >&2; exit 2; } ;;
+    -h|--help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "Unknown option: $1 (see --help)" >&2; exit 2 ;;
   esac
+  shift
 done
+if [ "$ALL" = 1 ] && [ "$LOGS" = 1 ]; then
+  echo "--logs follows one phone; with --all, follow each one with: adb -s <serial> logcat -s PHOTON" >&2
+  exit 2
+fi
+if [ -n "$LAN" ]; then
+  # Over Wi-Fi the phone reaches this computer by its address: no USB port forwarding, and no phone has to be
+  # plugged in (the APK can be copied over).
+  [ "$REVERSE_ONLY" = 0 ] || { echo "--reverse is for USB; with --lan there is nothing to forward" >&2; exit 2; }
+  API="http://$LAN:8080"
+  IMAGE="http://$LAN:8081"
+  WAIT_S="${PHONE_WAIT_S:-3}"
+else
+  API=http://127.0.0.1:8080
+  IMAGE=http://127.0.0.1:8081
+  WAIT_S="${PHONE_WAIT_S:-60}"
+fi
 
 SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Android/Sdk}}"
 if command -v adb >/dev/null 2>&1; then
@@ -36,91 +59,126 @@ else
   exit 1
 fi
 
-# 1. Exactly one authorised phone (or the one named by ANDROID_SERIAL)
+devices_in() { "$ADB" devices | awk -v s="$1" 'NR > 1 && $2 == s {print $1}'; }
+setup_hint="Plug it in and turn on USB debugging: Settings > About phone > tap Build number 7 times, then Settings > System > Developer options > USB debugging."
+
+# 1. Which phones: every authorised one (--all), or exactly one (or the one named by ANDROID_SERIAL).
+#    With --lan, none is required.
+SERIALS=""
 hinted=""
 deadline=$((SECONDS + WAIT_S))
 while :; do
+  ready="$(devices_in device)"
   if [ -n "${ANDROID_SERIAL:-}" ]; then
-    states="$("$ADB" devices | awk -v s="$ANDROID_SERIAL" 'NR > 1 && $1 == s {print $2}')"
-  else
-    states="$("$ADB" devices | awk 'NR > 1 && NF >= 2 {print $2}')"
+    ready="$(printf '%s\n' "$ready" | grep -Fx "$ANDROID_SERIAL" || true)"
   fi
-  count="$(printf '%s' "$states" | grep -c . || true)"
-  if [ "$count" -gt 1 ]; then
-    echo "Several devices are connected. Pick one:" >&2
+  waiting="$(devices_in unauthorized) $(devices_in offline)"
+  count="$(printf '%s' "$ready" | grep -c . || true)"
+  if [ "$ALL" = 0 ] && [ "$count" -gt 1 ]; then
+    echo "Several phones are connected. Set up all of them with: $0 --all" >&2
+    echo "or pick one with: ANDROID_SERIAL=<serial> $0" >&2
     "$ADB" devices -l | tail -n +2 >&2
-    echo "then run: ANDROID_SERIAL=<serial> $0 $*" >&2
     exit 1
   fi
-  if [ "$states" = "device" ]; then
+  if [ "$count" -ge 1 ] && { [ "$ALL" = 0 ] || [ -z "${waiting// /}" ]; }; then
+    SERIALS="$ready"
     break
   fi
-  case "$states" in
-    unauthorized) hint="Unlock the phone and accept the \"Allow USB debugging\" prompt." ;;
-    offline) hint="The phone is offline: unplug it and plug it in again." ;;
-    *) hint="No phone found. Plug it in and turn on USB debugging: Settings > About phone > tap Build number 7 times, then Settings > System > Developer options > USB debugging." ;;
-  esac
-  if [ "$hint" != "$hinted" ]; then
-    echo "$hint Waiting up to ${WAIT_S}s..."
-    hinted="$hint"
+  if [ -z "$LAN" ]; then
+    if [ -n "${waiting// /}" ]; then
+      hint="Unlock each phone and accept the \"Allow USB debugging\" prompt (waiting for: ${waiting// /})."
+    else
+      hint="No phone found. $setup_hint"
+    fi
+    if [ "$hint" != "$hinted" ]; then
+      echo "$hint Waiting up to ${WAIT_S}s..."
+      hinted="$hint"
+    fi
   fi
   if [ "$SECONDS" -ge "$deadline" ]; then
+    if [ "$count" -ge 1 ] || [ -n "$LAN" ]; then
+      [ "$count" -ge 1 ] && [ -n "${waiting// /}" ] && \
+        echo "Continuing with the ready phones; the others still need to accept USB debugging." >&2
+      SERIALS="$ready"
+      break
+    fi
     echo "Gave up waiting for the phone." >&2
     exit 1
   fi
-  sleep 2
+  sleep 1
 done
 
-model="$("$ADB" shell getprop ro.product.model | tr -d '\r')"
-sdk_level="$("$ADB" shell getprop ro.build.version.sdk | tr -d '\r')"
-echo "Phone: $model (Android API $sdk_level)"
-if [ "${sdk_level:-0}" -lt 26 ]; then
-  echo "PHOTON needs Android 8.0 (API 26) or newer." >&2
-  exit 1
-fi
-
-# 2. The backend must be up on this machine
-backend_ok=1
-for url in "$API/readyz" "$IMAGE/readyz"; do
-  if ! curl -sf -m 3 "$url" >/dev/null 2>&1; then
-    backend_ok=0
+for s in $SERIALS; do
+  model="$("$ADB" -s "$s" shell getprop ro.product.model | tr -d '\r')"
+  sdk_level="$("$ADB" -s "$s" shell getprop ro.build.version.sdk | tr -d '\r')"
+  echo "Phone: $model (Android API $sdk_level, serial $s)"
+  if [ "${sdk_level:-0}" -lt 26 ]; then
+    echo "  PHOTON needs Android 8.0 (API 26) or newer; skipping this phone." >&2
+    SERIALS="$(printf '%s\n' $SERIALS | grep -vFx "$s" || true)"
   fi
 done
-if [ "$backend_ok" = 0 ]; then
-  echo "Warning: the backend isn't answering on $API and $IMAGE." >&2
-  echo "         Start it in another terminal with scripts/phone-backend.sh (continuing anyway)." >&2
-fi
+[ -n "$SERIALS" ] || [ -n "$LAN" ] || exit 1
 
-# 3. The phone's 127.0.0.1:8080 and :8081 now reach this machine
-"$ADB" reverse tcp:8080 tcp:8080 >/dev/null
-"$ADB" reverse tcp:8081 tcp:8081 >/dev/null
-echo "Ports forwarded: phone 127.0.0.1:8080 and :8081 -> this machine"
+# 2. The backend must be up and reachable at the address the app will use
+for url in "$API/readyz" "$IMAGE/readyz"; do
+  if ! curl -sf -m 3 "$url" >/dev/null 2>&1; then
+    echo "Warning: the backend isn't answering on $API and $IMAGE." >&2
+    if [ -n "$LAN" ]; then
+      echo "         Start it with: scripts/phone-backend.sh --host 0.0.0.0 --public-host $LAN (continuing anyway)." >&2
+    else
+      echo "         Start it in another terminal with scripts/phone-backend.sh (continuing anyway)." >&2
+    fi
+    break
+  fi
+done
+
+# 3. USB: each phone's 127.0.0.1:8080 and :8081 reach this machine
+if [ -z "$LAN" ]; then
+  for s in $SERIALS; do
+    "$ADB" -s "$s" reverse tcp:8080 tcp:8080 >/dev/null
+    "$ADB" -s "$s" reverse tcp:8081 tcp:8081 >/dev/null
+    echo "Ports forwarded on $s: phone 127.0.0.1:8080 and :8081 -> this machine"
+  done
+fi
 if [ "$REVERSE_ONLY" = 1 ]; then
   exit 0
 fi
 
-# 4. Build and install the debug app pointed at those ports, then start it
-echo "Building and installing the debug app..."
-(cd "$ROOT/android" && ./gradlew -q installDebug \
+# 4. Build once, then install and start the app on each phone plugged in
+echo "Building the debug app for $API ..."
+(cd "$ROOT/android" && ./gradlew -q assembleDebug \
   -Pphoton.debug.apiBase="$API" -Pphoton.debug.imageBase="$IMAGE")
-"$ADB" shell monkey -p "$PACKAGE" -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1 || true
+for s in $SERIALS; do
+  echo "Installing on $s..."
+  "$ADB" -s "$s" install -r "$APK" >/dev/null
+  "$ADB" -s "$s" shell monkey -p "$PACKAGE" -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1 || true
+done
 
-cat <<EOF
-
-PHOTON is installed and open on the phone.
-  1. Sign in: "Developer sign-in" with any username, or Google/GitHub if the backend has them configured.
-  2. Create a session and note the 8-character code. Allow photos ("Allow all") and notifications.
-  3. Add a second member from this machine:
+n="$(printf '%s\n' $SERIALS | grep -c . || true)"
+echo
+if [ -n "$LAN" ]; then
+  echo "Built for Wi-Fi: the app talks to $API and $IMAGE. Every phone in the session needs this build."
+  echo "Phones not plugged in: copy this file to the phone and open it (allow \"Install unknown apps\"):"
+  echo "  $APK"
+  echo "Check each phone reaches the server first: open $API/healthz in its browser; it should show \"ok\"."
+fi
+echo "PHOTON is installed and open on $n phone(s)."
+cat <<GUIDE
+  1. Sign in on each phone with a different name: "Developer sign-in", or Google/GitHub if configured.
+  2. Create a session on one phone and note the 8-character code; join with it on the others
+     (or scan the QR code shown by the first phone). Allow photos ("Allow all") and notifications.
+  3. Take a photo on any phone: it appears on the others, and in their galleries under Pictures/PHOTON.
+  A computer can join too:
        cd $ROOT
        .venv/bin/photon-cli --profile bob login
        .venv/bin/photon-cli --profile bob join <CODE>
        .venv/bin/photon-cli --profile bob listen --save-dir ./received
-  4. Take a photo on the phone: it appears in ./received/.
-     .venv/bin/photon-cli --profile bob upload some.jpg  -> it appears in the phone's Pictures/PHOTON.
-After replugging the cable: $0 --reverse
-App log: $ADB logcat -s PHOTON
-EOF
+GUIDE
+if [ -z "$LAN" ]; then
+  echo "After replugging a cable: $0 --reverse$( [ "$ALL" = 1 ] && echo " --all" || true)"
+fi
+echo "App log: $ADB -s <serial> logcat -s PHOTON"
 
-if [ "$LOGS" = 1 ]; then
-  exec "$ADB" logcat -s PHOTON
+if [ "$LOGS" = 1 ] && [ -n "$SERIALS" ]; then
+  exec "$ADB" -s "$SERIALS" logcat -s PHOTON
 fi
