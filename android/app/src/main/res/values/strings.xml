@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">PHOTON</string>
+
+    <!-- Login -->
+    <string name="login_title">Share photos live with the people around you</string>
+    <string name="login_button">Sign in</string>
+    <string name="login_in_progress">Waiting for the browser…</string>
+    <string name="login_failed">Sign-in failed: %1$s</string>
+    <string name="sign_out">Sign out</string>
+
+    <!-- Home -->
+    <string name="create_session">Start a session</string>
+    <string name="join_session">Join</string>
+    <string name="join_code_label">Session code</string>
+    <string name="scan_qr">Scan a QR code</string>
+    <string name="scan_prompt">Scan a PHOTON invite</string>
+    <string name="invalid_invite">That isn\'t a PHOTON code or invite link.</string>
+
+    <!-- Consent (7.4, 8.3) -->
+    <string name="consent_title">Photos you take will be shared</string>
+    <string name="consent_body">While you are in this session, every photo you take with your camera is uploaded automatically and shared with all members of the session. Members can save those photos to their own galleries.\n\nPhotos taken before you join, screenshots and downloads are never shared. Location is removed from your photos before upload unless you turn that off in settings. You can pause sharing at any time from the app or the notification.</string>
+    <string name="consent_accept">Join and share</string>
+    <string name="consent_accept_create">Start and share</string>
+    <string name="cancel">Cancel</string>
+
+    <!-- Session -->
+    <string name="session_code">Code %1$s</string>
+    <string name="sync_on">Sharing is on</string>
+    <string name="sync_paused">Sharing is paused</string>
+    <string name="sync_pause_switch">Share new photos</string>
+    <string name="members_title">Members (%1$d)</string>
+    <string name="host_badge">host</string>
+    <string name="you_badge">you</string>
+    <string name="kick">Remove</string>
+    <string name="leave_session">Leave session</string>
+    <string name="end_session">End session for everyone</string>
+    <string name="rotate_invites">New invite link</string>
+    <string name="received_title">Received</string>
+    <string name="mine_title">Your photos</string>
+    <string name="no_photos_yet">No photos yet.</string>
+    <string name="recall">Recall</string>
+    <string name="report">Report</string>
+    <string name="session_ended_message">The session has ended.</string>
+    <string name="session_kicked_message">You are no longer a member of that session.</string>
+    <string name="session_left_message">You left the session.</string>
+
+    <!-- Recall (7.11). The wording is reviewed against Design.md "What recall does and does not do". -->
+    <string name="recall_title">Recall this photo?</string>
+    <string name="recall_body">Recall stops sharing this photo. Nobody can download it any more, and members\' apps delete their cached copies when they are next online.\n\nRecall cannot delete the photo from galleries where members have already saved it, and it cannot reach a member whose app never reconnects.</string>
+    <string name="recall_confirm">Recall</string>
+
+    <string name="report_title">Report this photo</string>
+    <string name="report_hint">What is wrong with it?</string>
+    <string name="report_confirm">Send report</string>
+    <string name="report_sent">Report sent.</string>
+
+    <!-- Settings (7.11) -->
+    <string name="settings_title">Settings</string>
+    <string name="setting_strip_gps">Remove location from my photos</string>
+    <string name="setting_strip_gps_detail">On by default. Turning it off shares where each photo was taken.</string>
+    <string name="setting_originals_wifi">Download originals on Wi-Fi or while charging</string>
+    <string name="setting_originals_wifi_detail">Thumbnails and previews still arrive at once.</string>
+
+    <!-- Permissions -->
+    <string name="perm_media_title">Allow access to all photos</string>
+    <string name="perm_media_body">PHOTON needs to see new photos as you take them. With access to selected photos only, new photos stay hidden from the app and nothing is shared.</string>
+    <string name="perm_media_grant">Allow access</string>
+    <string name="perm_open_settings">Open settings</string>
+    <string name="perm_notifications_body">Allow notifications so you can see when sharing is on and pause it from the notification.</string>
+    <string name="perm_notifications_grant">Allow notifications</string>
+
+    <!-- Notifications -->
+    <string name="channel_sync">Session sharing</string>
+    <string name="channel_sync_desc">Shown while photos are being shared in a session.</string>
+    <string name="channel_uploads">Upload problems</string>
+    <string name="channel_work">Background transfers</string>
+    <string name="notif_sync_title">PHOTON session %1$s</string>
+    <string name="notif_sync_text_on">Sharing photos you take with the session</string>
+    <string name="notif_sync_text_paused">Paused: new photos are not shared</string>
+    <string name="notif_pause">Pause</string>
+    <string name="notif_resume">Resume</string>
+    <string name="notif_leave">Leave</string>
+    <string name="notif_upload_rejected_title">A photo couldn\'t be shared</string>
+    <string name="notif_upload_rejected_text">The server rejected it (%1$s).</string>
+    <string name="notif_transfer">Transferring photos</string>
+
+    <!-- Host change and ALREADY_IN_SESSION -->
+    <string name="now_host_message">You are now the host of this session.</string>
+    <string name="conflict_title_retry">You\'re already in a session</string>
+    <string name="conflict_title_found">You\'re still in a session</string>
+    <string name="conflict_body">Session %1$s, where you are %2$s.</string>
+    <plurals name="conflict_members">
+        <item quantity="one">It has %d member.</item>
+        <item quantity="other">It has %d members.</item>
+    </plurals>
+    <string name="conflict_role_host">the host</string>
+    <string name="conflict_role_member">a member</string>
+    <string name="conflict_open_note">Opening it here shares photos you take from now on with its members.</string>
+    <string name="conflict_leave_note">You can be in one session at a time. Leaving it lets you continue with the new one.</string>
+    <string name="conflict_open">Open it</string>
+    <string name="conflict_leave">Leave it</string>
+    <string name="conflict_leave_and_continue">Leave it and continue</string>
+
+    <string name="error_generic">Something went wrong: %1$s</string>
+</resources>

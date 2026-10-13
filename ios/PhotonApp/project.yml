@@ -1,0 +1,66 @@
+# XcodeGen spec for the PHOTON iOS app. Generate the project with:
+#   brew install xcodegen
+#   cd ios/PhotonApp && xcodegen generate && open Photon.xcodeproj
+# The .xcodeproj is generated and not checked in.
+name: Photon
+options:
+  bundleIdPrefix: com.photon
+  deploymentTarget:
+    iOS: "17.4"          # ASWebAuthenticationSession https callbacks (Universal Link redirect)
+  createIntermediateGroups: true
+  developmentLanguage: en
+
+configs:
+  Debug: debug
+  Release: release
+
+packages:
+  PhotonKit:
+    path: ../PhotonKit
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"                 # PhotonKit itself builds in Swift 6 mode
+    SWIFT_STRICT_CONCURRENCY: targeted
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    DEAD_CODE_STRIPPING: YES
+
+targets:
+  PhotonApp:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+    configFiles:
+      Debug: Config/Debug.xcconfig
+      Release: Config/Release.xcconfig
+    settings:
+      base:
+        PRODUCT_NAME: PHOTON
+        INFOPLIST_FILE: Resources/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_ENTITLEMENTS: Resources/PhotonApp.entitlements
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: ""              # set your team id; the AASA must list <TEAMID>.com.photon.app
+        TARGETED_DEVICE_FAMILY: "1"
+        SUPPORTS_MACCATALYST: NO
+    dependencies:
+      - package: PhotonKit
+        product: PhotonKit
+      - sdk: Photos.framework
+      - sdk: AuthenticationServices.framework
+      - sdk: BackgroundTasks.framework
+      - sdk: Network.framework
+      - sdk: ImageIO.framework
+      - sdk: CoreImage.framework
+      - sdk: Security.framework
+
+schemes:
+  PhotonApp:
+    build:
+      targets:
+        PhotonApp: all
+    run:
+      config: Debug
+    archive:
+      config: Release

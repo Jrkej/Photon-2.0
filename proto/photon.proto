@@ -1,0 +1,206 @@
+// PHOTON wire format. Rules: never reuse or renumber a field; add new fields only.
+// Every HTTP body is application/x-protobuf; WebSocket frames are binary protobuf.
+syntax = "proto3";
+
+package photon.v1;
+
+option java_package = "com.photon.proto";
+option java_multiple_files = true;
+option swift_prefix = "Pb";
+
+// ---------------------------------------------------------------- design messages
+
+message AnnounceRequest {
+  bytes  sha256       = 1;
+  uint64 size         = 2;
+  string mime         = 3;
+  int64  taken_at_ms  = 4;
+  string session_id   = 5;   // added by the implementation plan
+}
+
+message AnnounceResponse {
+  enum Result { UPLOAD = 0; ALREADY_UPLOADED = 1; IN_PROGRESS = 2; }
+  Result result          = 1;
+  string upload_id       = 2;
+  string upload_url      = 3;
+  string upload_token    = 4;
+  uint32 chunk_size_hint = 5;
+}
+
+message PhotoStored {          // image server -> orchestrator
+  string session_id    = 1;
+  bytes  sha256        = 2;
+  string upload_id     = 3;
+  string uploader_id   = 4;
+  uint64 size          = 5;
+  string mime          = 6;
+  int64  taken_at_ms   = 7;
+  int64  stored_at_ms  = 8;
+  int64  expires_at_ms = 9;   // set by the image server
+}
+
+message PhotoRejected {        // image server -> orchestrator
+  string session_id = 1;
+  bytes  sha256     = 2;
+  string upload_id  = 3;
+  string reason     = 4;      // HASH_MISMATCH, INVALID_IMAGE
+}
+
+message PhotoEvent {           // orchestrator -> members
+  enum Type { PHOTO_STORED = 0; PHOTO_RECALLED = 1; MEMBER_JOINED = 2;
+              MEMBER_LEFT = 3; SESSION_ENDED = 4;
+              HOST_CHANGED = 5; }  // added: member_id is the new host
+  string event_id      = 1;    // Redis stream id, increasing per session
+  Type   type          = 2;
+  string session_id    = 3;
+  bytes  sha256        = 4;
+  string uploader_id   = 5;
+  uint64 size          = 6;
+  int64  taken_at_ms   = 7;
+  int64  expires_at_ms = 8;
+  string member_id     = 9;
+}
+
+message Snapshot {
+  string cursor                    = 1;  // continue the stream after this id
+  repeated PhotoEvent live_photos  = 2;  // STORED and not yet expired
+  repeated bytes recalled_sha256   = 3;
+  repeated string member_ids       = 4;
+}
+
+message Error {
+  string code            = 1;
+  string message         = 2;
+  bool   retryable       = 3;
+  uint32 retry_after_s   = 4;
+  repeated uint32 missing_chunks = 5;  // added: 400 on complete lists the missing chunk indexes
+}
+
+// ---------------------------------------------------------------- auth
+
+message OAuthStartRequest {
+  string provider       = 1;   // "google", "dev"
+  string redirect_uri   = 2;   // must equal the registered URI exactly
+  string code_challenge = 3;   // base64url(sha256(code_verifier)), 43 chars
+}
+
+message OAuthStartResponse {
+  string authorization_url = 1;
+  string state             = 2;
+}
+
+message OAuthCallbackRequest {
+  string code          = 1;
+  string state         = 2;
+  string code_verifier = 3;
+  string redirect_uri  = 4;
+}
+
+message TokenPair {
+  string access_token         = 1;
+  string refresh_token        = 2;
+  int64  access_expires_at_ms = 3;
+  string user_id              = 4;
+}
+
+message RefreshRequest {
+  string refresh_token = 1;
+}
+
+message DeviceRegistration {
+  string platform   = 1;   // "android" or "ios"
+  string push_token = 2;
+}
+
+// ---------------------------------------------------------------- sessions
+
+message CreateSessionRequest {
+  uint32 max_members = 1;   // 0 means the default
+}
+
+message SessionInfo {
+  string session_id    = 1;
+  string join_code     = 2;
+  string invite_url    = 3;
+  string qr_payload    = 4;
+  int64  expires_at_ms = 5;
+  string role          = 6;   // "host" or "member"
+  repeated string member_ids = 7;
+  string host_id       = 8;
+}
+
+message JoinRequest {
+  oneof by {
+    string code         = 1;
+    string invite_token = 2;
+  }
+}
+
+message SessionRef {
+  string session_id = 1;
+}
+
+message KickRequest {
+  string session_id = 1;
+  string member_id  = 2;
+}
+
+message ReportPhotoRequest {
+  string reason = 1;
+}
+
+// ---------------------------------------------------------------- uploads (image server)
+
+message UploadStatus {
+  string upload_id               = 1;
+  string state                   = 2;   // RECEIVING, VERIFIED, REPORTING, STORED, REJECTED, SUPERSEDED, ENDED
+  repeated uint32 received_chunks = 3;
+  uint64 received_bytes          = 4;
+  bool   server_has_file         = 5;
+}
+
+message CompleteRequest {
+  uint32 chunk_count = 1;
+}
+
+message CompleteResponse {
+  string state         = 1;   // STORED
+  bytes  sha256        = 2;
+  int64  stored_at_ms  = 3;
+  int64  expires_at_ms = 4;
+}
+
+message ReportAck {            // orchestrator -> image server
+  enum Result { APPLIED = 0; NOOP = 1; }
+  Result result   = 1;
+  string event_id = 2;
+}
+
+// ---------------------------------------------------------------- events
+
+message EventBatch {
+  repeated PhotoEvent events = 1;
+  string cursor              = 2;
+}
+
+message Hello {
+  string access_token  = 1;
+  string session_id    = 2;
+  string last_event_id = 3;
+}
+
+message ClientFrame {
+  oneof f {
+    Hello  hello = 1;
+    uint64 ping  = 2;
+  }
+}
+
+message ServerFrame {
+  oneof f {
+    PhotoEvent event        = 1;
+    Error      error        = 2;
+    uint64     pong         = 3;
+    string     ready_cursor = 4;
+  }
+}

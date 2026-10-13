@@ -1,0 +1,38 @@
+groups:
+  - name: photon
+    rules:
+      - alert: PhotoPastExpiry
+        expr: increase(photon_files_overdue_total[15m]) > 0 or photon_files_past_expiry > 0
+        for: 15m
+        labels: {severity: page}
+        annotations: {summary: "A photo file outlived its expires_at by 15 minutes"}
+      - alert: ReportsBacklog
+        expr: photon_outbox_oldest_seconds > 300
+        labels: {severity: page}
+        annotations: {summary: "Stored/rejected reports unacknowledged for 5 minutes"}
+      - alert: TmpDiskHigh
+        expr: photon_tmp_disk_bytes > 0.8 * 2147483648
+        for: 5m
+        annotations: {summary: "Image server temporary disk above 80% of its budget"}
+      - alert: DeleteFailures
+        expr: sum(rate(photon_deletes_total{result!="ok"}[10m])) / clamp_min(sum(rate(photon_deletes_total[10m])), 1e-9) > 0.05
+        for: 10m
+        annotations: {summary: "More than 5% of deletes failing"}
+      - alert: ExpiryBacklog
+        expr: photon_expiry_backlog_oldest_seconds > 300
+        annotations: {summary: "Expired photos waiting more than 5 minutes for deletion"}
+      - alert: HashMismatchSpike
+        expr: rate(photon_rejections_total{reason="HASH_MISMATCH"}[15m]) > 3 * rate(photon_rejections_total{reason="HASH_MISMATCH"}[24h] offset 15m) and rate(photon_rejections_total{reason="HASH_MISMATCH"}[15m]) > 0.01
+        annotations: {summary: "Hash mismatches above 3x their daily baseline"}
+      - alert: ClockSkew
+        expr: abs(node_timex_offset_seconds) > 0.1 or increase(photon_clock_skew_reports_total[10m]) > 0
+        annotations: {summary: "Host clock offset above 100 ms (expires_at is compared across hosts)"}
+      - alert: RedisReplicationLag
+        expr: redis_connected_slaves < 1 or max(redis_master_last_io_seconds_ago) > 5
+        annotations: {summary: "Redis replica missing or lagging"}
+      - alert: BlockingPoolNearlyFull
+        expr: photon_redis_blocking_pool_in_use > 0.8 * 200
+        annotations: {summary: "Blocking Redis pool (one per WebSocket) above 80%"}
+      - alert: RefreshTokenReuse
+        expr: increase(photon_refresh_reuse_total[1h]) > 5
+        annotations: {summary: "Refresh-token replays revoking families"}

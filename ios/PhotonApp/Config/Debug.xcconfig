@@ -1,0 +1,13 @@
+#include "Shared.xcconfig"
+
+// Local stack from `photon-dev` (API and Auth on :8080, image server on :8081). The iOS
+// Simulator reaches the Mac's localhost; for a device use the Mac's LAN address and start
+// photon-dev with --host 0.0.0.0.
+PHOTON_API_BASE = http:/$()/localhost:8080
+PHOTON_IMAGE_BASE = http:/$()/localhost:8081
+
+// The dev login provider with the development-only custom-scheme redirect.
+PHOTON_AUTH_PROVIDER = dev
+PHOTON_REDIRECT_URI = photon:/$()/auth/cb
+
+APS_ENVIRONMENT = development

@@ -1,0 +1,62 @@
+name: ci
+on: [push, pull_request]
+
+jobs:
+  server:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12", cache: pip}
+      - uses: actions/cache@v4
+        with:
+          path: .devtools
+          key: redis-7.2.4-${{ runner.os }}
+      - name: Build Redis
+        run: scripts/dev-deps.sh
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Generated protobuf code is current
+        run: |
+          python -m grpc_tools.protoc -Iproto --python_out=src/photon/common/pb --pyi_out=src/photon/common/pb proto/photon.proto
+          git diff --exit-code src/photon/common/pb
+      - name: Lint
+        run: ruff check src tests tools migrations
+      - name: Types
+        run: mypy src
+      - name: Tests
+        run: pytest -q
+      - name: Migrations downgrade cleanly
+        run: |
+          python - <<'PY'
+          import pgserver, tempfile
+          from photon import migrate
+          srv = pgserver.get_server(tempfile.mkdtemp(), cleanup_mode="stop")
+          url = srv.get_uri().replace("postgresql://", "postgresql+asyncpg://", 1)
+          migrate.upgrade(url); migrate.downgrade(url); migrate.upgrade(url)
+          srv.cleanup()
+          PY
+
+  proto-breaking:
+    runs-on: ubuntu-24.04
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: bufbuild/buf-action@v1
+        with:
+          input: proto
+          breaking_against: "${{ github.event.repository.clone_url }}#branch=${{ github.base_ref }},subdir=proto"
+          lint: false
+          push: false
+
+  android:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: {distribution: temurin, java-version: "21"}
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Build and unit-test
+        working-directory: android
+        run: ./gradlew assembleDebug testDebugUnitTest

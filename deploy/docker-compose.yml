@@ -1,0 +1,162 @@
+# Single-host deployment of PHOTON. Before the first `docker compose up`:
+#   python3 tools/gen_keys.py deploy/keys          # Ed25519 keys, one private key per service
+#   scripts/make-certs.sh deploy/certs              # internal CA + TLS certs for Redis
+#   cp deploy/users.acl.example deploy/users.acl    # then set the passwords (and in .env)
+# Set PHOTON_PUBLIC_HOST, PHOTON_IMAGE_HOST and the passwords in deploy/.env.
+name: photon
+
+x-app: &app
+  build: ..
+  image: photon:latest
+  restart: unless-stopped
+  env_file: .env
+  environment: &app-env
+    PHOTON_ENV: prod
+    PHOTON_DATABASE_URL: postgresql+asyncpg://photon:${POSTGRES_PASSWORD}@postgres/photon
+    PHOTON_PUBLIC_BASE_URL: https://${PHOTON_PUBLIC_HOST}
+    PHOTON_API_BASE_URL: https://${PHOTON_PUBLIC_HOST}
+    PHOTON_IMAGE_BASE_URL: https://${PHOTON_IMAGE_HOST}
+    PHOTON_ORCHESTRATOR_INTERNAL_URL: http://orchestrator:8080
+    PHOTON_IMAGESERVER_INTERNAL_URL: http://imageserver:8081
+    PHOTON_TRUSTED_PROXIES: '["caddy"]'
+  volumes:
+    - ./certs/ca.pem:/certs/ca.pem:ro
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+    redis:
+      condition: service_healthy
+
+services:
+  redis:
+    image: redis:7.2
+    command: ["redis-server", "/etc/redis/redis.conf"]
+    volumes:
+      - ./redis.conf:/etc/redis/redis.conf:ro
+      - ./users.acl:/etc/redis/users.acl:ro
+      - ./certs:/certs:ro
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "--tls", "--cacert", "/certs/ca.pem", "--user", "healthcheck",
+             "--pass", "healthcheck", "ping"]
+      interval: 5s
+
+  redis-replica:
+    image: redis:7.2
+    command: ["redis-server", "/etc/redis/redis.conf", "--replicaof", "redis", "6379",
+              "--masteruser", "replica", "--masterauth", "${REDIS_REPLICA_PASSWORD}"]
+    volumes:
+      - ./redis.conf:/etc/redis/redis.conf:ro
+      - ./users.acl:/etc/redis/users.acl:ro
+      - ./certs:/certs:ro
+      - redis-replica-data:/data
+    depends_on: [redis]
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: photon
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: photon
+    volumes: [pg-data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "photon"]
+      interval: 5s
+
+  migrate:
+    image: photon:latest
+    build: ..
+    command: ["python", "-m", "photon.migrate"]
+    environment:
+      PHOTON_DATABASE_URL: postgresql+asyncpg://photon:${POSTGRES_PASSWORD}@postgres/photon
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  auth:
+    <<: *app
+    command: ["python", "-m", "photon.auth"]
+    deploy: {replicas: 2}
+    environment:
+      <<: *app-env
+      PHOTON_REDIS_URL: rediss://auth:${REDIS_AUTH_PASSWORD}@redis:6379/0?ssl_ca_certs=/certs/ca.pem
+    secrets:
+      - {source: auth-access-key, target: /run/secrets/photon/auth-access.pem}
+      - {source: auth-access-kid, target: /run/secrets/photon/auth-access.kid}
+      - {source: auth-access-pub, target: /run/secrets/photon/auth-access.pub.pem}
+
+  orchestrator:
+    <<: *app
+    command: ["python", "-m", "photon.orchestrator"]
+    deploy: {replicas: 2}
+    environment:
+      <<: *app-env
+      PHOTON_REDIS_URL: rediss://orchestrator:${REDIS_ORCHESTRATOR_PASSWORD}@redis:6379/0?ssl_ca_certs=/certs/ca.pem
+      PHOTON_FCM_CREDENTIALS_FILE: ${PHOTON_FCM_CREDENTIALS_FILE:-}
+    secrets:
+      - {source: orch-upload-key, target: /run/secrets/photon/orch-upload.pem}
+      - {source: orch-upload-kid, target: /run/secrets/photon/orch-upload.kid}
+      - {source: svc-orchestrator-key, target: /run/secrets/photon/svc-orchestrator.pem}
+      - {source: svc-orchestrator-kid, target: /run/secrets/photon/svc-orchestrator.kid}
+      - {source: auth-access-pub, target: /run/secrets/photon/auth-access.pub.pem}
+      - {source: auth-access-kid, target: /run/secrets/photon/auth-access.kid}
+      - {source: svc-imageserver-pub, target: /run/secrets/photon/svc-imageserver.pub.pem}
+      - {source: svc-imageserver-kid, target: /run/secrets/photon/svc-imageserver.kid}
+
+  imageserver:
+    <<: *app
+    command: ["python", "-m", "photon.imageserver"]
+    environment:
+      <<: *app-env
+      PHOTON_REDIS_URL: rediss://imageserver:${REDIS_IMAGESERVER_PASSWORD}@redis:6379/0?ssl_ca_certs=/certs/ca.pem
+      PHOTON_STORAGE_ROOT: /var/lib/photon
+    volumes:
+      - ./certs/ca.pem:/certs/ca.pem:ro
+      - photos:/var/lib/photon
+    secrets:
+      - {source: svc-imageserver-key, target: /run/secrets/photon/svc-imageserver.pem}
+      - {source: svc-imageserver-kid, target: /run/secrets/photon/svc-imageserver.kid}
+      - {source: orch-upload-pub, target: /run/secrets/photon/orch-upload.pub.pem}
+      - {source: orch-upload-kid, target: /run/secrets/photon/orch-upload.kid}
+      - {source: auth-access-pub, target: /run/secrets/photon/auth-access.pub.pem}
+      - {source: auth-access-kid, target: /run/secrets/photon/auth-access.kid}
+      - {source: svc-orchestrator-pub, target: /run/secrets/photon/svc-orchestrator.pub.pem}
+      - {source: svc-orchestrator-kid, target: /run/secrets/photon/svc-orchestrator.kid}
+
+  caddy:
+    image: caddy:2.8
+    restart: unless-stopped
+    ports: ["80:80", "443:443", "443:443/udp"]
+    env_file: .env
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    depends_on: [auth, orchestrator, imageserver]
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./alerts.yml:/etc/prometheus/alerts.yml:ro
+    ports: ["127.0.0.1:9090:9090"]
+
+secrets:
+  auth-access-key: {file: ./keys/auth-access.pem}
+  auth-access-pub: {file: ./keys/auth-access.pub.pem}
+  auth-access-kid: {file: ./keys/auth-access.kid}
+  orch-upload-key: {file: ./keys/orch-upload.pem}
+  orch-upload-pub: {file: ./keys/orch-upload.pub.pem}
+  orch-upload-kid: {file: ./keys/orch-upload.kid}
+  svc-orchestrator-key: {file: ./keys/svc-orchestrator.pem}
+  svc-orchestrator-pub: {file: ./keys/svc-orchestrator.pub.pem}
+  svc-orchestrator-kid: {file: ./keys/svc-orchestrator.kid}
+  svc-imageserver-key: {file: ./keys/svc-imageserver.pem}
+  svc-imageserver-pub: {file: ./keys/svc-imageserver.pub.pem}
+  svc-imageserver-kid: {file: ./keys/svc-imageserver.kid}
+
+volumes:
+  redis-data:
+  redis-replica-data:
+  pg-data:
+  photos:
+  caddy-data:

@@ -1,0 +1,11 @@
+#include "Shared.xcconfig"
+
+// Placeholders: set the real deployment hosts here.
+PHOTON_API_BASE = https:/$()/api.photon.example
+PHOTON_IMAGE_BASE = https:/$()/img.photon.example
+
+// Google sign-in, redirected through the registered Universal Link.
+PHOTON_AUTH_PROVIDER = google
+PHOTON_REDIRECT_URI = https:/$()/photon.example/auth/cb
+
+APS_ENVIRONMENT = production

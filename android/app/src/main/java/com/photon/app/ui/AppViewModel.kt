@@ -1,0 +1,289 @@
+package com.photon.app.ui
+
+import android.app.Application
+import android.net.Uri
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import com.photon.app.BuildConfig
+import com.photon.app.R
+import com.photon.app.auth.LoginException
+import com.photon.app.data.db.PendingPhoto
+import com.photon.app.data.db.ReceivedPhoto
+import com.photon.app.data.db.SessionState
+import com.photon.app.events.ConnectionState
+import com.photon.app.graph
+import com.photon.app.net.ApiException
+import com.photon.app.net.ErrorCodes
+import com.photon.app.session.EndReason
+import com.photon.app.session.InviteLinks
+import com.photon.app.session.JoinConflict
+import com.photon.app.session.JoinTarget
+import com.photon.app.session.SessionRules
+import com.photon.proto.SessionInfo
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import java.io.IOException
+
+sealed interface Consent {
+    data object Create : Consent
+    data class Join(val target: JoinTarget) : Consent
+}
+
+/**
+ * The server has this user in [info] already. [retry] is the create or join that was refused
+ * with ALREADY_IN_SESSION, or null when found at start-up (local state lost).
+ */
+data class SessionConflict(val info: SessionInfo, val retry: Consent?)
+
+data class UiState(
+    val busy: Boolean = false,
+    val loginInProgress: Boolean = false,
+    val consent: Consent? = null,
+    val conflict: SessionConflict? = null,
+    /** An invite opened while signed out, kept until login finishes. */
+    val pendingInvite: JoinTarget? = null,
+)
+
+@OptIn(ExperimentalCoroutinesApi::class)
+class AppViewModel(application: Application) : AndroidViewModel(application) {
+    private val graph = application.graph
+    private val app = application
+
+    private val state = MutableStateFlow(UiState())
+    val ui: StateFlow<UiState> = state.asStateFlow()
+
+    private val messageChannel = Channel<String>(Channel.BUFFERED)
+    val messages: Flow<String> = messageChannel.receiveAsFlow()
+
+    val signedIn: StateFlow<Boolean> = graph.tokens.signedIn
+    val selfUserId: String? get() = graph.tokens.userId
+
+    val session: StateFlow<SessionState?> = graph.sessions.session
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    val members: StateFlow<List<String>> = session
+        .flatMapLatest { s -> s?.let { graph.db.sessions().observeMembers(it.sessionId) } ?: flowOf(emptyList()) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    val received: StateFlow<List<ReceivedPhoto>> = session
+        .flatMapLatest { s -> s?.let { graph.db.received().observeVisible(it.sessionId) } ?: flowOf(emptyList()) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    val mine: StateFlow<List<PendingPhoto>> = session
+        .flatMapLatest { s -> s?.let { graph.db.pending().observeForSession(it.sessionId) } ?: flowOf(emptyList()) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    val connection: StateFlow<ConnectionState> = graph.connection.state
+
+    data class Settings(val stripGps: Boolean = true, val originalsWifiOrCharging: Boolean = false)
+
+    val settings: StateFlow<Settings> = combine(graph.settings.stripGps, graph.settings.originalsWifiOrCharging) { a, b ->
+        Settings(a, b)
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, Settings())
+
+    init {
+        viewModelScope.launch {
+            var previous: SessionState? = null
+            graph.sessions.session.collect { current ->
+                if (SessionRules.becameHost(previous, current)) messageChannel.trySend(app.getString(R.string.now_host_message))
+                previous = current
+            }
+        }
+        viewModelScope.launch {
+            if (signedIn.value && graph.sessions.current() == null) checkServerSession()
+        }
+        viewModelScope.launch {
+            graph.sessions.ended.collect { reason ->
+                val text = when (reason) {
+                    EndReason.ENDED -> R.string.session_ended_message
+                    EndReason.KICKED -> R.string.session_kicked_message
+                    EndReason.LEFT -> R.string.session_left_message
+                    EndReason.SIGNED_OUT -> null
+                }
+                text?.let { messageChannel.trySend(app.getString(it)) }
+            }
+        }
+    }
+
+    // ---- links
+
+    /** A deep link: the OAuth redirect or an invite. */
+    fun onLink(uri: Uri) {
+        if (graph.login.isRedirect(uri)) {
+            finishLogin(uri)
+            return
+        }
+        val target = InviteLinks.parse(uri.toString(), BuildConfig.APP_LINK_HOST) ?: return
+        if (!signedIn.value) {
+            state.update { it.copy(pendingInvite = target) }
+        } else {
+            requestJoin(target)
+        }
+    }
+
+    // ---- login
+
+    fun startLogin(open: (Uri) -> Unit) = launchBusy {
+        state.update { it.copy(loginInProgress = true) }
+        try {
+            open(graph.login.start())
+        } catch (e: Exception) {
+            state.update { it.copy(loginInProgress = false) }
+            throw e
+        }
+    }
+
+    private fun finishLogin(uri: Uri) = launchBusy {
+        try {
+            graph.login.finish(uri)
+            graph.sessions.onSignedIn()
+        } finally {
+            state.update { it.copy(loginInProgress = false) }
+        }
+        if (graph.sessions.current() == null) checkServerSession()
+        state.value.pendingInvite?.let { target ->
+            state.update { it.copy(pendingInvite = null) }
+            requestJoin(target)
+        }
+    }
+
+    fun signOut() = launchBusy { graph.sessions.signOut() }
+
+    // ---- create / join
+
+    fun requestCreate() = state.update { it.copy(consent = Consent.Create) }
+
+    fun requestJoinByText(text: String) {
+        val target = InviteLinks.parse(text, BuildConfig.APP_LINK_HOST)
+        if (target == null) {
+            messageChannel.trySend(app.getString(R.string.invalid_invite))
+        } else {
+            requestJoin(target)
+        }
+    }
+
+    fun requestJoin(target: JoinTarget) = state.update { it.copy(consent = Consent.Join(target)) }
+
+    fun dismissConsent() = state.update { it.copy(consent = null) }
+
+    /** Consent given: only now is the join (or create) call made (7.4). */
+    fun confirmConsent() {
+        val consent = state.value.consent ?: return
+        state.update { it.copy(consent = null) }
+        launchBusy { runConsented(consent) }
+    }
+
+    /** Create or join; on ALREADY_IN_SESSION, show which session the user is in. */
+    private suspend fun runConsented(consent: Consent) {
+        val attempt = JoinConflict.attempt(
+            action = {
+                when (consent) {
+                    Consent.Create -> graph.sessions.create()
+                    is Consent.Join -> graph.sessions.join(consent.target)
+                }
+            },
+            current = { graph.sessions.serverSession() },
+        )
+        if (attempt is JoinConflict.Attempt.InOther) {
+            state.update { it.copy(conflict = SessionConflict(attempt.info, consent)) }
+        }
+    }
+
+    /** Start-up and after login: the server may know a session this device lost. */
+    private suspend fun checkServerSession() {
+        val info = try {
+            graph.sessions.serverSession()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            null // offline or signed out: nothing to offer now
+        } ?: return
+        if (graph.sessions.current() == null) state.update { it.copy(conflict = SessionConflict(info, retry = null)) }
+    }
+
+    /** Open the session the server has the user in, on this device. */
+    fun openConflictSession() {
+        val conflict = state.value.conflict ?: return
+        state.update { it.copy(conflict = null) }
+        launchBusy { graph.sessions.open(conflict.info) }
+    }
+
+    /** Leave the other session, then retry the refused create or join. */
+    fun leaveConflictSession() {
+        val conflict = state.value.conflict ?: return
+        state.update { it.copy(conflict = null) }
+        launchBusy {
+            graph.sessions.leaveRemote(conflict.info.session_id)
+            conflict.retry?.let { runConsented(it) }
+        }
+    }
+
+    fun dismissConflict() = state.update { it.copy(conflict = null) }
+
+    // ---- in a session
+
+    fun setPaused(paused: Boolean) = launchBusy { graph.sessions.setPaused(paused) }
+    fun leave() = launchBusy { graph.sessions.leave() }
+    fun endForEveryone() = launchBusy { graph.sessions.endForEveryone() }
+    fun kick(memberId: String) = launchBusy { graph.sessions.kick(memberId) }
+    fun rotateInvites() = launchBusy { graph.sessions.rotateInvites() }
+    fun recall(sha256: String) = launchBusy { graph.sessions.recall(sha256) }
+
+    fun report(sha256: String, reason: String) = launchBusy {
+        graph.sessions.report(sha256, reason)
+        messageChannel.trySend(app.getString(R.string.report_sent))
+    }
+
+    /** Gallery access was granted (or widened): look for photos the observer couldn't see. */
+    fun onMediaAccessChanged() {
+        if (session.value != null) graph.scheduler.enqueueReconcile()
+    }
+
+    fun setStripGps(value: Boolean) = viewModelScope.launch { graph.settings.setStripGps(value) }
+
+    fun setOriginalsWifiOrCharging(value: Boolean) = viewModelScope.launch { graph.settings.setOriginalsWifiOrCharging(value) }
+
+    private fun launchBusy(block: suspend () -> Unit) {
+        viewModelScope.launch {
+            state.update { it.copy(busy = true) }
+            try {
+                block()
+            } catch (e: ApiException) {
+                messageChannel.trySend(describe(e))
+            } catch (e: LoginException) {
+                messageChannel.trySend(app.getString(R.string.login_failed, e.message.orEmpty()))
+            } catch (e: IOException) {
+                messageChannel.trySend(app.getString(R.string.error_generic, e.message ?: "network error"))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // No browser for Custom Tabs, a session that ended mid-join, and the like.
+                messageChannel.trySend(app.getString(R.string.error_generic, e.message ?: e.javaClass.simpleName))
+            } finally {
+                state.update { it.copy(busy = false) }
+            }
+        }
+    }
+
+    private fun describe(e: ApiException): String = when (e.code) {
+        ErrorCodes.SESSION_NOT_FOUND -> "No session with that code or invite. It may have expired."
+        ErrorCodes.ALREADY_IN_SESSION -> "You're already in another session. Leave it first."
+        ErrorCodes.SESSION_ENDED -> app.getString(R.string.session_ended_message)
+        ErrorCodes.RATE_LIMITED -> "Too many attempts. Try again in a minute."
+        ErrorCodes.FORBIDDEN -> e.serverMessage.ifEmpty { "Not allowed." }
+        else -> app.getString(R.string.error_generic, e.serverMessage.ifEmpty { e.code })
+    }
+}

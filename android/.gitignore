@@ -1,0 +1,10 @@
+.gradle/
+build/
+/app/build/
+local.properties
+.idea/
+*.iml
+.kotlin/
+captures/
+# Firebase config is per environment; the build works without it.
+/app/google-services.json

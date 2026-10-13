@@ -1,0 +1,6 @@
+user default off
+user healthcheck on >healthcheck -@all +ping
+user replica on >change-me-replica -@all +psync +replconf +ping
+user orchestrator on >change-me-orchestrator ~* &* +@all -@admin -flushall -flushdb -keys -debug -shutdown -monitor -function|flush -function|delete -function|restore +function|load +function|list +client|setname
+user auth on >change-me-auth ~oauth:* ~refresh:* ~rfam:* ~rl:* -@all +@read +@write +@scripting -function|load +ping +hello +client|setname
+user imageserver on >change-me-imageserver %R~session:* %RW~upload:* -@all +fcall +fcall_ro +hget +hmget +hexists +exists +pexpire +hset +ping +hello +client|setname

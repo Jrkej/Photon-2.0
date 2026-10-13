@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>PHOTON</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+
+	<!-- Photo library: read to find new photos, write to save received originals. -->
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>PHOTON looks for photos you take while you are in a session and shares them with its members. Photos taken before you join are never read.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>PHOTON saves the photos other members share into a PHOTON album in your library.</string>
+
+	<!-- Silent push (content-available) triggers a catch-up; background refresh may too.
+	     Neither is relied on: nothing is promised while the app is suspended. -->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>remote-notification</string>
+		<string>fetch</string>
+	</array>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>com.photon.app.catchup</string>
+	</array>
+
+	<!-- Deployment configuration, filled from Config/*.xcconfig. -->
+	<key>PhotonAPIBase</key>
+	<string>$(PHOTON_API_BASE)</string>
+	<key>PhotonImageBase</key>
+	<string>$(PHOTON_IMAGE_BASE)</string>
+	<key>PhotonAuthProvider</key>
+	<string>$(PHOTON_AUTH_PROVIDER)</string>
+	<key>PhotonRedirectURI</key>
+	<string>$(PHOTON_REDIRECT_URI)</string>
+	<key>PhotonInviteHost</key>
+	<string>$(PHOTON_INVITE_HOST)</string>
+
+	<!-- Plain HTTP only to local hosts (the photon-dev stack); everything else needs TLS. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<false/>
+	</dict>
+	<key>UILaunchScreen</key>
+	<dict/>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+	</array>
+</dict>
+</plist>

@@ -1,0 +1,43 @@
+# TLS 1.3 at the edge, HTTP/3 (QUIC) with automatic HTTP/2 fallback (Caddy advertises Alt-Svc itself).
+# Internal routes and metrics are never reachable from outside.
+{
+	servers {
+		protocols h1 h2 h3
+	}
+}
+
+{$PHOTON_PUBLIC_HOST} {
+	@private path /internal/* /metrics /readyz
+	respond @private 404
+
+	@auth path /v1/auth/* /v1/devices/* /.well-known/*
+	handle @auth {
+		reverse_proxy auth:8082 {
+			lb_policy round_robin
+		}
+	}
+	handle {
+		# WebSocket upgrades pass through; no sticky sessions are needed (events come from the Redis stream).
+		reverse_proxy orchestrator:8080 {
+			lb_policy least_conn
+			stream_timeout 24h
+		}
+	}
+}
+
+{$PHOTON_IMAGE_HOST} {
+	@private path /internal/* /metrics /readyz
+	respond @private 404
+
+	@chunks path /v1/uploads/*/chunks/*
+	request_body @chunks {
+		max_size 9MB
+	}
+	reverse_proxy imageserver:8081 {
+		flush_interval -1
+		transport http {
+			read_timeout 5m
+			write_timeout 5m
+		}
+	}
+}

@@ -1,0 +1,11 @@
+// Settings shared by every configuration. `//` starts a comment in xcconfig files, so URLs
+// are written as `https:/$()/host`: `$()` expands to nothing and keeps the double slash.
+
+PRODUCT_BUNDLE_IDENTIFIER = com.photon.app
+MARKETING_VERSION = 0.1.0
+CURRENT_PROJECT_VERSION = 1
+
+// Host of invite links (https://photon.example/j/<token>) and of the Universal Link login
+// redirect. Its /.well-known/apple-app-site-association must list TEAMID.com.photon.app under
+// applinks and webcredentials (the backend's Auth app serves it).
+PHOTON_INVITE_HOST = photon.example
