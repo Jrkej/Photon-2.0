@@ -111,9 +111,20 @@ Both phones and this computer must be on the same Wi-Fi. This exposes the develo
 1. Find this computer's Wi-Fi address: `ip route get 1.1.1.1` shows it after `src` (for example `10.81.65.165`). Ignore the `172.x` addresses from `hostname -I`; they are Docker's internal networks.
 2. **Terminal 1:** `scripts/phone-backend.sh --host 0.0.0.0 --public-host 10.81.65.165`
 3. On each phone, open `http://10.81.65.165:8080/healthz` in the browser. It must show `ok`. If it doesn't, open the ports (`sudo ufw allow 8080,8081/tcp`). If it still fails, the Wi-Fi keeps devices apart (common on campus and office networks); use USB instead.
-4. **Terminal 2:** `scripts/phone-install.sh --lan 10.81.65.165` (add `--all` if several phones are plugged in). It builds the app **for that address**, installs it on any phone that's plugged in, and prints the APK file for the others. Copy `android/app/build/outputs/apk/debug/app-debug.apk` to a phone that isn't plugged in and open it (allow "Install unknown apps"); it updates the existing app.
+4. **Terminal 2:** build the app for that address:
+   ```bash
+   scripts/phone-install.sh --lan 10.81.65.165        # add --all if several phones are plugged in
+   ```
+   It builds the app **for that address**, installs it on any phone that's plugged in, and prints where the APK is.
+5. Install it on every phone that step 4 didn't already:
+   - **Plugged in by USB** (for example, plugged in after step 4):
+     ```bash
+     adb install -r android/app/build/outputs/apk/debug/app-debug.apk
+     ```
+   - **Not plugged in:** copy `android/app/build/outputs/apk/debug/app-debug.apk` to the phone (cable, Drive, a chat app, anything) and open it, allowing "Install unknown apps" when asked. It updates PHOTON in place and keeps the sign-in.
+6. Sign in with a different name on each phone, create a session on one, and join it from the others.
 
-Every phone in the session needs this Wi-Fi build. An app built by the plain `scripts/phone-install.sh` talks to `127.0.0.1`, which over Wi-Fi is the phone itself: the browser check passes, but the app says it can't reach the server. Developer sign-in works the same; GitHub and Google sign-in need their callback set up for this address, so stick to Developer sign-in here. If the computer's address changes (another network, or a reconnect), restart the backend and run step 4 again with the new address.
+Every phone in the session needs this Wi-Fi build. An app built by the plain `scripts/phone-install.sh` talks to `127.0.0.1`, which over Wi-Fi is the phone itself: the browser check passes, but the app says it can't reach the server. Developer sign-in works the same; GitHub and Google sign-in need their callback set up for this address, so stick to Developer sign-in here. If the computer's address changes (another network, or a reconnect), restart the backend and repeat steps 4 and 5 with the new address.
 
 ## If something doesn't arrive
 
@@ -128,6 +139,7 @@ The usual causes, in order:
 2. **The port forwarding is gone** after the cable was replugged or adb restarted. The app's log shows `Failed to connect to /127.0.0.1:8080`. Run `scripts/phone-install.sh --reverse`.
 3. **The phone shows "unauthorized"** in the report. Unlock it and accept the USB debugging prompt.
 4. **"Sync service: NOT RUNNING"** while you're in a session. Open the app once; it restarts the service. If it keeps stopping, the report's "Why the process last died" and app log sections show why.
+5. **Wi-Fi: the browser shows `ok` at `/healthz`, but the app says it can't reach the server.** The app on the phone was built for USB (`127.0.0.1`, which over Wi-Fi is the phone itself). Run `scripts/phone-install.sh --lan <address>` and install the new APK ([Over Wi-Fi](#over-wi-fi-a-phone-that-isnt-plugged-in), steps 4 and 5).
 
 ## Starting over
 
