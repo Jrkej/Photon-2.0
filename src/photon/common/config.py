@@ -20,7 +20,8 @@ class Settings(BaseSettings):
 
     # Stores
     redis_url: str = "redis://localhost:6379/0"
-    redis_blocking_pool: int = 200
+    redis_pool: int = 500  # connections per process for ordinary commands; callers wait (up to 5 s) for one
+    redis_blocking_pool: int = 200  # one per open WebSocket (XREAD BLOCK), per orchestrator process
     database_url: str = "postgresql+asyncpg://photon@localhost/photon"
 
     # Where things are

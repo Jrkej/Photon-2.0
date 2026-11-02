@@ -45,7 +45,7 @@ def create_app(settings: Settings | None = None, keys: OrchestratorKeys | None =
     svc = Svc(
         settings,
         keys,
-        make_client(settings.redis_url),
+        make_client(settings.redis_url, settings.redis_pool),
         make_blocking_client(settings.redis_url, settings.redis_blocking_pool),
         db.make_engine(settings.database_url) if settings.database_url else None,
     )

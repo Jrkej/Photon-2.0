@@ -80,6 +80,9 @@ def router(svc: Svc, user: Callable[[Request], Awaitable[str]]) -> APIRouter:
         conn = Connection(svc, ws)
         try:
             await conn.run()
+        except Exception as e:  # a server fault, not a normal end: 1011 tells the client to reconnect with backoff
+            log.exception("ws_failed", error=repr(e))
+            conn.close_code = 1011
         finally:
             await conn.close()
 

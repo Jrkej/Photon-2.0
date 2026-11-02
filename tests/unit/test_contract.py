@@ -92,3 +92,17 @@ def test_every_function_call_stays_in_one_slot() -> None:
         assert len({slot(n) for n in names}) == 1
         fam = ids.new_invite_token()[:22]
         assert slot(refresh_key(fam, "a" * 64)) == slot(refresh_key(fam, "b" * 64)) == slot(family_key(fam))
+
+
+async def test_redis_pool_waits_instead_of_failing(redis_url: str) -> None:
+    """More concurrent commands than connections: callers wait for a free one rather than fail."""
+    import asyncio
+
+    from photon.common.redisutil import make_client
+
+    r = make_client(redis_url, max_connections=3)
+    try:
+        results = await asyncio.gather(*(r.ping() for _ in range(200)))
+        assert all(results)
+    finally:
+        await r.aclose()

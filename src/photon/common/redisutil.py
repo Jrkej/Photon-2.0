@@ -14,8 +14,13 @@ from photon.common.errors import ApiError
 LIB_PATH = Path(__file__).resolve().parent.parent / "orchestrator" / "lua" / "photon.lua"
 
 
-def make_client(url: str, max_connections: int | None = None) -> Redis:
-    return Redis.from_url(url, decode_responses=True, max_connections=max_connections, health_check_interval=30)
+def make_client(url: str, max_connections: int = 500) -> Redis:
+    """Ordinary commands. A blocking pool: when every connection is busy, a caller waits (up to 5 s) for one.
+    redis-py 8's default pool instead caps at 100 connections and fails the 101st concurrent command at once
+    ("Too many connections"), which a replica under load reaches easily."""
+    pool = BlockingConnectionPool.from_url(url, max_connections=max_connections, timeout=5, decode_responses=True,
+                                           health_check_interval=30, socket_connect_timeout=5)
+    return Redis(connection_pool=pool)
 
 
 def make_blocking_client(url: str, max_connections: int) -> Redis:

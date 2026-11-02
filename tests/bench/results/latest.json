@@ -1,0 +1,279 @@
+{
+  "machine": {
+    "cpu": "13th Gen Intel(R) Core(TM) i5-13450HX",
+    "threads": "16",
+    "memory": "15 GB",
+    "python": "3.12.3",
+    "redis": "7.2.4",
+    "os": "Linux-7.0.0-38-generic-x86_64-with-glibc2.39"
+  },
+  "started": 1793620602.383264,
+  "sections": [
+    {
+      "name": "1. Lua state transitions (Redis functions)",
+      "rows": [
+        {
+          "function": "join",
+          "n": 9,
+          "p50_ms": 0.07027599895081948,
+          "p95_ms": 0.1173511998786125,
+          "p99_ms": 0.1358238399552647,
+          "mean_ms": 0.07840977761790985,
+          "max_ms": 0.14044199997442774
+        },
+        {
+          "function": "announce (new photo)",
+          "n": 1000,
+          "p50_ms": 0.07702499988226919,
+          "p95_ms": 0.17226605014002414,
+          "p99_ms": 0.25758812953426946,
+          "mean_ms": 0.09180484998069005,
+          "max_ms": 0.34107499959645793
+        },
+        {
+          "function": "report_stored (+ event)",
+          "n": 1000,
+          "p50_ms": 0.07333550001931144,
+          "p95_ms": 0.1680374497482262,
+          "p99_ms": 0.2448904699849663,
+          "mean_ms": 0.08629595399725076,
+          "max_ms": 0.3097339995292714
+        },
+        {
+          "function": "announce (duplicate)",
+          "n": 1000,
+          "p50_ms": 0.08169599914253922,
+          "p95_ms": 0.13485924991982756,
+          "p99_ms": 0.22238562984057353,
+          "mean_ms": 0.0853384020338126,
+          "max_ms": 0.3988089993072208
+        },
+        {
+          "function": "download_check",
+          "n": 1000,
+          "p50_ms": 0.06541200036735972,
+          "p95_ms": 0.14649070062660025,
+          "p99_ms": 0.28323004942649277,
+          "mean_ms": 0.07993328600059613,
+          "max_ms": 0.36539500069920905
+        },
+        {
+          "function": "events_since (500 events)",
+          "n": 50,
+          "p50_ms": 14.392070000212698,
+          "p95_ms": 15.27356429987776,
+          "p99_ms": 32.06676840969515,
+          "mean_ms": 15.109068779893278,
+          "max_ms": 47.41699399892241
+        },
+        {
+          "function": "snapshot (1000 stored photos)",
+          "n": 30,
+          "p50_ms": 10.910100499131659,
+          "p95_ms": 14.606800249839583,
+          "p99_ms": 18.835059819575694,
+          "mean_ms": 11.447230833437061,
+          "max_ms": 19.870313999490463
+        }
+      ],
+      "note": "Throughput with 64 requests in flight from one Python process: 14,038 download_check/s. Redis runs each function atomically on one core; the client side is usually the limit."
+    },
+    {
+      "name": "2. Tokens and checksums (one core)",
+      "rows": [
+        {
+          "operation": "sign access JWT (Ed25519)",
+          "rate": "34,230/s"
+        },
+        {
+          "operation": "verify access JWT (every request)",
+          "rate": "9,842/s"
+        },
+        {
+          "operation": "SHA-256 (upload verification)",
+          "rate": "1,831 MB/s"
+        },
+        {
+          "operation": "CRC32C (every chunk)",
+          "rate": "11,403 MB/s"
+        }
+      ],
+      "note": ""
+    },
+    {
+      "name": "3. Image validation and thumbnails (sandboxed subprocess, median of 3)",
+      "rows": [
+        {
+          "image": "tiny JPEG 64\u00d748 (process overhead)",
+          "size": "0.0 MB",
+          "validate_ms": 47.61728900120943,
+          "thumb_ms": 64.01131900020118,
+          "preview_ms": 72.83942600042792
+        },
+        {
+          "image": "JPEG 1600\u00d71200",
+          "size": "0.4 MB",
+          "validate_ms": 59.37679999988177,
+          "thumb_ms": 89.31600199866807,
+          "preview_ms": 203.0360609987838
+        },
+        {
+          "image": "JPEG 4032\u00d73024 (12 MP)",
+          "size": "2.6 MB",
+          "validate_ms": 96.80036200006725,
+          "thumb_ms": 151.1775300004956,
+          "preview_ms": 325.10565300071903
+        },
+        {
+          "image": "HEIC 4032\u00d73024 (12 MP)",
+          "size": "5.5 MB",
+          "validate_ms": 573.8099219997821,
+          "thumb_ms": 625.3030999996554,
+          "preview_ms": 800.564437000503
+        }
+      ],
+      "note": "validate + thumb run on every upload's complete; preview runs once, on the first preview download. A 12 MP photo costs about validate + thumb of CPU on the image server."
+    },
+    {
+      "name": "4. Announce over HTTP (JWT check, protobuf, Lua, upload-token signing)",
+      "rows": [
+        {
+          "concurrent clients": 1,
+          "requests/s": 545.319151632818,
+          "n": 1500,
+          "p50_ms": 1.607459500519326,
+          "p95_ms": 1.974371299093036,
+          "p99_ms": 2.613830810587387,
+          "mean_ms": 1.6606379153236048,
+          "max_ms": 4.083395999259665
+        },
+        {
+          "concurrent clients": 16,
+          "requests/s": 695.8118859996551,
+          "n": 1488,
+          "p50_ms": 18.866529499973694,
+          "p95_ms": 19.84617634989263,
+          "p99_ms": 29.580636710179537,
+          "mean_ms": 19.16393186086078,
+          "max_ms": 57.47328899997228
+        },
+        {
+          "concurrent clients": 64,
+          "requests/s": 703.915855979965,
+          "n": 1472,
+          "p50_ms": 72.02829300058511,
+          "p95_ms": 114.9742779501139,
+          "p99_ms": 151.728518370237,
+          "mean_ms": 75.48228470312655,
+          "max_ms": 152.68182599902502
+        },
+        {
+          "concurrent clients": "16 (duplicate)",
+          "requests/s": 407.55335765865584,
+          "n": 1500,
+          "p50_ms": 32.878773000447836,
+          "p95_ms": 67.7547161010807,
+          "p99_ms": 91.71117749030597,
+          "mean_ms": 38.319026558661186,
+          "max_ms": 1120.7072870001866
+        }
+      ],
+      "note": "One uvicorn worker per service, all in one Python process with the client: the services and the load generator share the same event loop and CPU."
+    },
+    {
+      "name": "5. Upload end to end by photo size (median of 3; 1 MiB chunks, 3 in parallel)",
+      "rows": [
+        {
+          "photo": "1600\u00d71200",
+          "size": "0.4 MB",
+          "announce_ms": 2.5614719997975044,
+          "chunks_ms": 7.671432998904493,
+          "chunk MB/s": 55.04069449088553,
+          "complete_ms": 168.83828199934214,
+          "total_ms": 183.44021499979135
+        },
+        {
+          "photo": "3000\u00d72250",
+          "size": "1.5 MB",
+          "announce_ms": 2.949704999991809,
+          "chunks_ms": 11.35391800016805,
+          "chunk MB/s": 128.86221302446825,
+          "complete_ms": 215.55918999911228,
+          "total_ms": 229.8310650003259
+        },
+        {
+          "photo": "4032\u00d73024 (12 MP)",
+          "size": "3.1 MB",
+          "announce_ms": 2.503907999198418,
+          "chunks_ms": 21.048189000794082,
+          "chunk MB/s": 146.3897440242367,
+          "complete_ms": 298.49311399993894,
+          "total_ms": 321.79713799996534
+        },
+        {
+          "photo": "4032\u00d73024, heavy grain",
+          "size": "8.7 MB",
+          "announce_ms": 2.579354999397765,
+          "chunks_ms": 38.4693519990833,
+          "chunk MB/s": 226.46620094374353,
+          "complete_ms": 350.8330950007803,
+          "total_ms": 391.67241500035743
+        }
+      ],
+      "note": "complete = assemble + SHA-256 + validate + thumbnail + metadata + the fenced report to the orchestrator. Over loopback; on a phone the chunk phase is bounded by the network."
+    },
+    {
+      "name": "6. Live delivery to a 10-member session (20 photos of 800\u00d7600)",
+      "rows": [
+        {
+          "measure": "event appended \u2192 frame received (each member)",
+          "n": 200,
+          "p50_ms": 2.5870361328125,
+          "p95_ms": 4.28819580078125,
+          "p99_ms": 4.475439453125,
+          "mean_ms": 2.9036328125,
+          "max_ms": 4.493408203125
+        },
+        {
+          "measure": "upload start \u2192 last of 10 members received",
+          "n": 20,
+          "p50_ms": 158.72314453125,
+          "p95_ms": 166.54815673828125,
+          "p99_ms": 167.80709228515624,
+          "mean_ms": 158.27938232421874,
+          "max_ms": 168.121826171875
+        }
+      ],
+      "note": "The first row is the fan-out path alone: Redis stream \u2192 XREAD \u2192 WebSocket. The second adds the upload."
+    },
+    {
+      "name": "7. WebSocket fan-out: 153 sockets in 17 sessions",
+      "rows": [
+        {
+          "measure": "event appended \u2192 frame received",
+          "n": 3060,
+          "p50_ms": 28.8427734375,
+          "p95_ms": 31.323132324219458,
+          "p99_ms": 35.788046875,
+          "mean_ms": 28.104925816355188,
+          "max_ms": 36.339111328125
+        }
+      ],
+      "note": "3060/3060 deliveries. All 153 sockets connected and ready in 0.25 s (sign-in and session setup took 3.3 s before that). Redis connections: 131 \u2192 284 (+153): each open socket holds one blocking Redis connection (XREAD BLOCK). The pool is PHOTON_REDIS_BLOCKING_POOL (default 200) per orchestrator replica, so it caps open sockets per replica; add replicas or raise it for more."
+    },
+    {
+      "name": "8. Upload throughput: 8 members uploading at once (48 photos of 2400\u00d71800)",
+      "rows": [
+        {
+          "photos": 48,
+          "wall_s": 1.9389317229997687,
+          "photos/s": 24.755900081792475,
+          "MB/s": 23.2115130544003,
+          "per-photo p50_ms": 291.02636900006473,
+          "per-photo p95_ms": 388.14416650020576
+        }
+      ],
+      "note": "45 MB in total. Bound by CPU: hashing, and the two decode subprocesses per photo (validate, thumb), with 16 decoders allowed at once."
+    }
+  ]
+}

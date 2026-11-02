@@ -76,7 +76,7 @@ def create_app(settings: Settings | None = None, keys: AuthKeys | None = None,
     keys = keys or load_keys(settings)
     if not keys.published:
         keys.published = {keys.signing.kid: keys.signing.public}
-    redis = make_client(settings.redis_url)
+    redis = make_client(settings.redis_url, settings.redis_pool)
     engine = db.make_engine(settings.database_url)
     tokens = Tokens(settings, keys.signing, redis)
     dev = DevProvider(settings, keys.signing)

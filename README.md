@@ -65,6 +65,8 @@ Other commands: `info`, `snapshot`, `catchup`, `recall <sha>`, `report <sha> <re
 | [tests/integration/test_acl.py](tests/integration/test_acl.py) | The Redis ACL file: each service can do its job and nothing else |
 | [tests/e2e/](tests/e2e/) | Login, create, join, upload, live event, download, dedupe, recall, end |
 
+Benchmarks are in `tests/bench/`, skipped by the normal run: `scripts/bench.sh` runs them (about a minute) and writes [tests/bench/results/latest.md](tests/bench/results/latest.md).
+
 The harness starts a real Redis, an embedded Postgres and all three services on random ports. Time is driven through `photon.common.clock`, so expiry and grace windows are tested without waiting.
 
 ## Configuration

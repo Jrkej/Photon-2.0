@@ -283,3 +283,19 @@ async def test_live_delivery(pair: tuple[str, PhotonClient, PhotonClient]) -> No
     await eventually(all_arrived)
     await host.end(sid)
     await asyncio.wait_for(task, 5)
+
+
+async def test_many_sockets_at_once(pair: tuple[str, PhotonClient, PhotonClient], env: Stack) -> None:
+    """Regression: redis-py 8's default pool failed the 101st concurrent Redis command, so 150 sockets connecting
+    together left 50 closed with 1000. Every socket must become ready."""
+    sid, _, member = pair
+    cursor = (await member.snapshot(sid)).cursor
+
+    async def one() -> int:
+        async with connect(ws_url(env), open_timeout=30) as ws:
+            await hello(ws, member.tokens.access_token, sid, cursor)
+            f = pb.ServerFrame()
+            f.ParseFromString(await asyncio.wait_for(ws.recv(), 20))  # type: ignore[arg-type]
+            return 1 if f.WhichOneof("f") == "ready_cursor" else 0
+
+    assert sum(await asyncio.gather(*(one() for _ in range(160)))) == 160

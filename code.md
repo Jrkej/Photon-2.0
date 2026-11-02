@@ -133,6 +133,7 @@ The backend is three services, Auth, the orchestrator and the image server. All 
 | `integration/test_retention.py` | Expiry, both sweepers, retried deletes, orphans, the recount |
 | `integration/test_limits.py`, `test_acl.py` | Rate limits, reports, push; the Redis ACL file |
 | `e2e/test_e2e.py` | Two users sharing a photo, end to end |
+| `bench/` | Benchmarks, skipped by default; run with `scripts/bench.sh`. Results go to `bench/results/latest.md` |
 
 ## migrations/
 
@@ -146,6 +147,7 @@ The backend is three services, Auth, the orchestrator and the image server. All 
 | `tools/photon_cli.py` | Wrapper for `photon-cli` |
 | `tools/loadtest.py` | Many sessions and members uploading and receiving; reports latencies and delivery counts |
 | `scripts/dev-deps.sh` | Builds Redis 7.2 into `.devtools/` |
+| `scripts/bench.sh` | Runs the benchmarks on their own stack (about a minute); `-k <name>` runs some |
 | `scripts/make-certs.sh` | An internal CA and a TLS certificate for Redis |
 | `scripts/phone-backend.sh` | Terminal 1 of the phone setup: runs the dev backend |
 | `scripts/phone-install.sh` | Terminal 2: `adb reverse`, then build, install and open the Android app on a USB phone (`--reverse` only restores the port forwarding) |

@@ -50,7 +50,7 @@ def create_app(settings: Settings | None = None, keys: ImageServerKeys | None = 
     settings = settings or Settings()
     keys = keys or load_keys(settings)
     store = Store(settings.storage_root)
-    redis = make_client(settings.redis_url)
+    redis = make_client(settings.redis_url, settings.redis_pool)
     access = Access(redis, settings)
     decoder = Decoder(settings)
     outbox = Outbox(settings, store, jwtutil.ServiceTokens("imageserver", keys.service, settings.service_token_ttl_s))
