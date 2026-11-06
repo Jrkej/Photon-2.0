@@ -18,6 +18,7 @@ import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import com.photon.app.core.Notifications
 import com.photon.app.events.CatchUpWorker
+import com.photon.app.keys.KeyMaintenanceWorker
 import com.photon.app.push.DeviceRegistrationWorker
 import com.photon.app.receive.OriginalWorker
 import com.photon.app.receive.ReceiveWorker
@@ -125,6 +126,30 @@ class WorkScheduler(context: Context) {
     }
 
     /**
+     * The same, after key maintenance brought the epoch key a photo was waiting for. Appended to a job that is
+     * still running (it may be about to give up for want of that key), so the photo always gets another run.
+     */
+    fun resumeReceive(sha256: String) {
+        val request = OneTimeWorkRequestBuilder<ReceiveWorker>()
+            .setInputData(workDataOf(ReceiveWorker.KEY_SHA256 to sha256))
+            .setConstraints(connected)
+            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 15, TimeUnit.SECONDS)
+            .addTag(TAG_SESSION)
+            .build()
+        wm.enqueueUniqueWork(receiveName(sha256), ExistingWorkPolicy.APPEND_OR_REPLACE, request)
+    }
+
+    /** Key maintenance (e2ee.md 5.3) in the background, after an in-process run failed. */
+    fun enqueueKeyMaintenance() {
+        val request = OneTimeWorkRequestBuilder<KeyMaintenanceWorker>()
+            .setConstraints(connected)
+            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
+            .addTag(TAG_SESSION)
+            .build()
+        wm.enqueueUniqueWork(KEY_MAINTENANCE, ExistingWorkPolicy.KEEP, request)
+    }
+
+    /**
      * "Originals on Wi-Fi or while charging": two works, one needing an unmetered network and one
      * needing the charger. Whichever runs first saves the photo and cancels the other.
      */
@@ -184,6 +209,7 @@ class WorkScheduler(context: Context) {
         const val UPLOAD_WAKEUP = "upload-wakeup"
         const val RECONCILE = "reconcile"
         const val CATCH_UP = "catch-up"
+        const val KEY_MAINTENANCE = "key-maintenance"
         const val PURGE = "purge"
         const val PURGE_AT_START = "purge-at-start"
         const val DEVICE_REGISTRATION = "device-registration"

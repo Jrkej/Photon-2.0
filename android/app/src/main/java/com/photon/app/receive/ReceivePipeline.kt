@@ -1,5 +1,6 @@
 package com.photon.app.receive
 
+import android.util.Log
 import com.photon.app.core.Clock
 import com.photon.app.core.EventIds
 import com.photon.app.core.Hashes
@@ -11,6 +12,7 @@ import com.photon.app.data.db.ReceivedPhoto
 import com.photon.app.data.db.SessionMember
 import com.photon.app.data.db.SessionState
 import com.photon.app.events.knownType
+import com.photon.app.keys.KeyHints
 import com.photon.app.session.EndReason
 import com.photon.app.session.SessionManager
 import com.photon.app.session.SessionRules
@@ -32,6 +34,8 @@ class ReceivePipeline(
     private val cache: MediaCache,
     private val sessions: () -> SessionManager,
     private val clock: Clock,
+    /** Key events and snapshots tell key maintenance (e2ee.md 5.3); it never blocks event processing. */
+    private val keyHints: () -> KeyHints = { KeyHints.NONE },
 ) {
     private val mutex = Mutex()
 
@@ -74,6 +78,9 @@ class ReceivePipeline(
             snapshot.live_photos.forEach { onStored(s, it) }
             db.sessions().setLastEventId(sessionId, snapshot.cursor.ifEmpty { EMPTY_STREAM_CURSOR })
         }
+        // Events skipped by the snapshot may have been joins that need the key sealed for them.
+        keyHints().currentEpoch(sessionId, snapshot.key_epoch)
+        keyHints().maintenanceNeeded()
     }
 
     /** Moves the cursor forward after a catch-up page whose events have all been handled. */
@@ -107,6 +114,20 @@ class ReceivePipeline(
         }
     }
 
+    /**
+     * A photo that didn't decrypt, isn't the image its metadata names, or whose original doesn't match the
+     * uploader's photo tag (e2ee.md 6.2): it is not saved, and its cached copies go.
+     */
+    suspend fun markFailed(sessionId: String, sha256: String, why: String) {
+        Log.w(TAG, "received photo $sha256 in $sessionId failed: $why")
+        mutex.withLock {
+            scheduler.cancelReceive(sha256)
+            cache.original(sha256).delete()
+            cache.decrypted(sha256).delete()
+            db.received().markFailed(sha256)
+        }
+    }
+
     /** The server answered 410 for a download. */
     suspend fun markGone(sessionId: String, sha256: String, recalled: Boolean) {
         mutex.withLock {
@@ -133,6 +154,19 @@ class ReceivePipeline(
             }
             PhotoEvent.Type.MEMBER_JOINED -> {
                 if (event.member_id.isNotEmpty()) db.sessions().addMembers(listOf(SessionMember(s.sessionId, event.member_id)))
+                // A newcomer, or a member on a new install: seal the session key for them.
+                if (event.member_id != s.userId) keyHints().maintenanceNeeded()
+                null
+            }
+            PhotoEvent.Type.KEY_SHARED -> {
+                // A sealed key is waiting for this user.
+                if (event.member_id == s.userId || s.userId.isEmpty()) keyHints().maintenanceNeeded()
+                null
+            }
+            PhotoEvent.Type.KEY_ROTATED -> {
+                keyHints().currentEpoch(s.sessionId, event.key_epoch)
+                // Another member started a new epoch: fetch the box it sealed for this phone.
+                if (event.member_id != s.userId) keyHints().maintenanceNeeded()
                 null
             }
             PhotoEvent.Type.MEMBER_LEFT -> {
@@ -160,11 +194,13 @@ class ReceivePipeline(
     private suspend fun onStored(s: SessionState, event: PhotoEvent) {
         if (event.sha256.size != Hashes.SHA256_BYTES) return
         val sha = event.sha256.hex()
+        val tag = event.photo_tag.takeIf { it.size == Hashes.SHA256_BYTES }?.hex()
         val now = clock.nowMs()
         val local = LocalHashState(
             inHashes = db.hashes().contains(sha),
             inReceivedPhotos = db.received().get(sha) != null,
-            inOwnQueue = db.pending().countByHash(sha) > 0,
+            // Another member's upload of a photo in our queue is another file (hash) with the same tag.
+            inOwnQueue = db.pending().countByHash(sha) > 0 || (tag != null && db.pending().countByTag(tag) > 0),
         )
         val decision = ReceiveDedupe.decideStored(
             eventId = "",
@@ -180,6 +216,7 @@ class ReceivePipeline(
                 // This also settles WAITING rows: the hash is now stored in the session, so the
                 // other member's upload of these bytes succeeded and ours is not needed.
                 db.pending().markSyncedByHash(sha)
+                tag?.let { db.pending().markSyncedByTag(it) }
                 db.hashes().insertIgnore(KnownHash(sha, KnownHash.UPLOADED, s.sessionId, now))
             }
             StoredDecision.FETCH -> {
@@ -192,6 +229,8 @@ class ReceivePipeline(
                     sizeBytes = event.size,
                     state = ReceiveState.THUMB,
                     receivedAtMs = now,
+                    photoTag = tag,
+                    keyEpoch = event.key_epoch,
                 )
                 if (db.received().insertIgnore(row) != -1L) scheduler.enqueueReceive(sha)
             }
@@ -221,5 +260,6 @@ class ReceivePipeline(
     companion object {
         /** The cursor of a stream with no entries yet. */
         const val EMPTY_STREAM_CURSOR = "0-0"
+        private const val TAG = "PHOTON"
     }
 }

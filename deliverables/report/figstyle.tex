@@ -1,0 +1,56 @@
+% Shared colours and TikZ styles. Used by main.tex and by figures/standalone.tex
+% (which renders each figure to PNG for the Word report and the slides).
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric,shapes.misc,fit,calc,backgrounds,shadows}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+
+\definecolor{navy}{HTML}{1B365D}
+\definecolor{pblue}{HTML}{2E6DB4}
+\definecolor{headblue}{HTML}{2F5F98}
+\definecolor{boxfill}{HTML}{EAF1FA}
+\definecolor{boxline}{HTML}{6E9CD2}
+\colorlet{blueline}{boxline}\colorlet{bluefill}{boxfill}
+\definecolor{rowalt}{HTML}{EEF4FB}
+\definecolor{redfill}{HTML}{FCEBEB}
+\definecolor{redline}{HTML}{D9534F}
+\definecolor{redtab}{HTML}{C62828}
+\definecolor{greenfill}{HTML}{EAF6EA}
+\definecolor{greenline}{HTML}{5CB85C}
+\definecolor{greentab}{HTML}{2E7D32}
+\definecolor{yellowfill}{HTML}{FFF6D5}
+\definecolor{yellowline}{HTML}{D4A017}
+\definecolor{orangefill}{HTML}{FDEBD8}
+\definecolor{orangeline}{HTML}{E08A2E}
+\definecolor{grayfill}{HTML}{EFEFEF}
+\definecolor{grayline}{HTML}{8A8A8A}
+\definecolor{purplefill}{HTML}{F1EAF8}
+\definecolor{purpleline}{HTML}{8E6BBF}
+\definecolor{codebg}{HTML}{F6F8FA}
+
+\tikzset{
+  >={Stealth[length=2.2mm]},
+  every picture/.style={font=\small},
+  blk/.style={draw=boxline, fill=boxfill, rounded corners=2pt, align=center, inner sep=4pt, minimum height=8mm, line width=0.6pt},
+  svc/.style={blk, minimum width=26mm},
+  cli/.style={blk, draw=greenline, fill=greenfill},
+  ext/.style={blk, draw=grayline, fill=grayfill},
+  bad/.style={blk, draw=redline, fill=redfill},
+  warn/.style={blk, draw=yellowline, fill=yellowfill},
+  edgeb/.style={blk, draw=orangeline, fill=orangefill},
+  pur/.style={blk, draw=purpleline, fill=purplefill},
+  store/.style={cylinder, shape border rotate=90, aspect=0.22, draw=greenline, fill=greenfill, align=center, minimum width=20mm, minimum height=11mm, inner sep=3pt, line width=0.6pt},
+  arr/.style={->, draw=navy!80, line width=0.7pt},
+  darr/.style={<->, draw=navy!80, line width=0.7pt},
+  dsh/.style={->, draw=grayline, dashed, line width=0.7pt},
+  hot/.style={->, draw=redtab, line width=1.1pt},
+  lbl/.style={font=\scriptsize, fill=white, inner sep=1pt, align=center},
+  lblc/.style={font=\scriptsize, inner sep=1pt, align=center},
+  zone/.style={draw=grayline, dashed, rounded corners=4pt, inner sep=6pt},
+  zonet/.style={font=\scriptsize\bfseries, text=grayline},
+  st/.style={minimum width=22mm, minimum height=9mm},
+  lifeline/.style={draw=grayline, dashed, line width=0.5pt},
+  actor/.style={blk, minimum width=22mm, font=\small\bfseries},
+  msg/.style={->, draw=navy!85, line width=0.6pt},
+  rmsg/.style={->, draw=navy!60, dashed, line width=0.6pt},
+}

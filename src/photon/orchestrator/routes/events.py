@@ -38,15 +38,16 @@ def router(svc: Svc, user: Callable[[Request], Awaitable[str]]) -> APIRouter:
     @r.get("/v1/sessions/{sid}/snapshot")
     async def snapshot(sid: str, uid: str = Depends(user)) -> Response:
         check_sid(sid)
-        cursor, member_ids, live, recalled = await svc.fn.call_ro(
+        cursor, member_ids, live, recalled, key_epoch = await svc.fn.call_ro(
             "snapshot", K.session_keys(sid), sid, clock.now_ms(), svc.ret, uid
         )
-        snap = pb.Snapshot(cursor=cursor, member_ids=member_ids,
+        snap = pb.Snapshot(cursor=cursor, member_ids=member_ids, key_epoch=int(key_epoch),
                            recalled_sha256=[bytes.fromhex(h) for h in recalled])
-        for sha, uploader, size, taken_at, expires_at in live:
+        for sha, uploader, size, taken_at, expires_at, tag, epoch in live:
             snap.live_photos.append(pb.PhotoEvent(
                 type=pb.PhotoEvent.PHOTO_STORED, session_id=sid, sha256=bytes.fromhex(sha),
                 uploader_id=uploader, size=int(size), taken_at_ms=int(taken_at), expires_at_ms=int(expires_at),
+                photo_tag=bytes.fromhex(tag) if tag else b"", key_epoch=int(epoch),
             ))
         return proto_response(snap)
 

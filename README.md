@@ -2,11 +2,16 @@
 
 PHOTON syncs photos between the galleries of everyone in a live session: when one member takes a photo, it lands in every other member's gallery. A photo is announced to the session only after the image server has verified its SHA-256 and stored it, and server copies expire 30 minutes after they are stored.
 
+Photos are **end-to-end encrypted**. The phone encrypts each photo, with its thumbnail and preview, before uploading it, and members decrypt it after downloading it. The session key passes between members' phones sealed to each phone's X25519 public key, relayed by a server that can't open it, and it rotates when a member leaves or is kicked. The servers store only encrypted files and verify the SHA-256 of the encrypted bytes.
+
 - [Design.md](Design.md) is the system design: the architecture, protocols, data model and the guarantees the server makes.
+- [e2ee.md](e2ee.md) specifies the end-to-end encryption: keys, sealed boxes, the key relay and rotation, and the encrypted file's byte layout.
+- [flows.md](flows.md) follows every request through the system, step by step, with links to the code.
 - [implementation.md](implementation.md) is the build plan, phase by phase, with every decision the design left open.
 - [code.md](code.md) is a map of the repository: what every directory and file is for.
 - [prehost.md](prehost.md) is the checklist of everything to do before hosting PHOTON.
 - [local.md](local.md) explains how to test locally on an Android phone: which scripts to run, where, and what to check.
+- [cloudflare.md](cloudflare.md) runs that same local backend behind Cloudflare Tunnel, so phones reach it from any network.
 
 ## What is here
 
@@ -15,11 +20,12 @@ PHOTON syncs photos between the galleries of everyone in a live session: when on
 | Auth (OAuth with PKCE, JWTs, refresh rotation) | [src/photon/auth/](src/photon/auth/) | Python | Built and tested |
 | Orchestrator (sessions, announce, fencing, events, WebSocket, sweepers, push) | [src/photon/orchestrator/](src/photon/orchestrator/) | Python, Lua | Built and tested |
 | State transitions (Redis Functions library) | [src/photon/orchestrator/lua/photon.lua](src/photon/orchestrator/lua/photon.lua) | Lua | Built and tested |
-| Image server (chunked upload, verification, sandboxed decoding, outbox, downloads, retention) | [src/photon/imageserver/](src/photon/imageserver/) | Python | Built and tested |
-| Reference client, CLI, load test | [src/photon/client/](src/photon/client/), [tools/](tools/) | Python | Built and tested |
+| Image server (chunked upload, hash and header verification of encrypted files, outbox, downloads and thumbnail and preview prefixes, retention) | [src/photon/imageserver/](src/photon/imageserver/) | Python | Built and tested |
+| End-to-end encryption (identity keys, sealed session keys, the encrypted file format) | [src/photon/common/e2ee.py](src/photon/common/e2ee.py), [e2ee.md](e2ee.md), test vectors in [tests/vectors/](tests/vectors/) | Python | Built and tested; the vectors are what every client must reproduce |
+| Reference client, CLI, load test (encrypts, decrypts, relays keys) | [src/photon/client/](src/photon/client/), [tools/](tools/) | Python | Built and tested |
 | Wire format | [proto/photon.proto](proto/photon.proto) | Protobuf | Shared by all parts |
 | Android app | [android/](android/) | Kotlin | Builds; 96 unit tests pass; not yet run on a device. See [android/README.md](android/README.md) |
-| iOS app | [ios/](ios/) | Swift | PhotonKit core: 90 tests pass on Linux. App target not yet compiled (needs Xcode). See [ios/README.md](ios/README.md) |
+| iOS app | [ios/](ios/) | Swift | PhotonKit core: 90 tests pass on Linux. App target not yet compiled (needs Xcode). **Not updated to end-to-end encryption**, so it can't create, join or upload against this server yet. See [ios/README.md](ios/README.md) |
 | Deployment | [deploy/](deploy/), [Dockerfile](Dockerfile) | Compose, Caddy, Redis, Prometheus | Written; validated pieces listed below |
 
 ## Quick start (no Docker)
@@ -27,7 +33,7 @@ PHOTON syncs photos between the galleries of everyone in a live session: when on
 ```bash
 scripts/dev-deps.sh                     # builds Redis 7.2 into .devtools/ (Postgres comes from a pip wheel)
 python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
-.venv/bin/pytest -q                     # 153 tests: unit, integration, end to end
+.venv/bin/pytest -q                     # unit, integration and end-to-end tests
 .venv/bin/photon-dev                    # API on :8080 (Auth + orchestrator), image server on :8081
 ```
 
@@ -40,30 +46,35 @@ Two users sharing photos with the script client:
 ```bash
 photon-cli --profile alice login
 photon-cli --profile bob login
-photon-cli --profile alice create                 # prints the join code and the invite link
-photon-cli --profile bob join <CODE>
-photon-cli --profile bob listen --save-dir ./received &
-photon-cli --profile alice upload IMG_0001.jpg IMG_0002.heic
+photon-cli --profile alice create                 # makes the session key; prints the join code and invite link
+photon-cli --profile alice listen &               # alice's listener seals the session key for each newcomer
+photon-cli --profile bob join <CODE>              # waits up to --wait seconds (15) for a member to share the key
+photon-cli --profile bob listen --save-dir ./received &   # decrypts each photo before saving it
+photon-cli --profile alice upload IMG_0001.jpg IMG_0002.heic   # encrypts before uploading
+photon-cli --profile bob keys                     # the epochs held, and every member's security code
 photon-cli --profile alice end
 ```
 
-Other commands: `info`, `snapshot`, `catchup`, `recall <sha>`, `report <sha> <reason>`, `download <sha>`, `kick <user>`, `rotate`, `leave`, `device`.
+Each profile keeps its identity key and session keys in `$PHOTON_HOME/<profile>.keys.json` (mode 600; `PHOTON_HOME` defaults to `~/.photon`). Deleting that file is like reinstalling the app: on the next join, members must seal the key again. A newcomer gets the key only once some member's client runs key maintenance (`listen` or `keys` both do).
+
+Other commands: `info`, `snapshot`, `catchup`, `recall <sha>`, `report <sha> <reason>`, `download <sha>` (decrypted; `--raw` saves the encrypted file as served), `kick <user>`, `rotate` (the invite, not the key), `leave`, `device`.
 
 ## Tests
 
 | Suite | What it proves |
 | --- | --- |
-| [tests/unit/](tests/unit/) | The error contract, ids, one Redis slot per function call, token verification, the decoder against hostile files, push routing |
+| [tests/unit/](tests/unit/) | The error contract, ids, one Redis slot per function call, token verification, push routing; `test_e2ee.py`: the E2EE test vectors byte for byte, round trips, every flipped byte rejected, bad headers, sealed boxes bound to recipient, session and epoch, and the keyring file |
 | [tests/integration/test_auth.py](tests/integration/test_auth.py) | Single-use OAuth state, PKCE, exact redirect URIs, refresh grace window and reuse revocation, identity never merged by email |
 | [tests/integration/test_sessions.py](tests/integration/test_sessions.py) | Capacity under concurrent joins, one session per user, host hand-over, kick, joins racing the end, idle expiry |
-| [tests/integration/test_upload.py](tests/integration/test_upload.py) | Resumable chunks, idempotent complete in every state, hash mismatch, crash recovery through the outbox, thumbnail retries |
+| [tests/integration/test_upload.py](tests/integration/test_upload.py) | Resumable chunks, idempotent complete in every state, hash mismatch, crash recovery through the outbox |
+| [tests/integration/test_keys.py](tests/integration/test_keys.py) | End-to-end encryption through the real stack: three people joining one after another all read every photo, rotation after a leave or kick, the rotation race, the server holding only ciphertext, thumbnail and preview prefixes, tag dedupe and mislabelled tags, plaintext uploads refused |
 | [tests/integration/test_fencing.py](tests/integration/test_fencing.py) | One upload per hash, quota races, live-upload limits, stale reports fenced out, Redis-loss recovery, recall, strikes |
 | [tests/integration/test_model.py](tests/integration/test_model.py) | Random sequences of every transition against the real Lua functions, with the quota and event invariants checked after each step |
 | [tests/integration/test_events.py](tests/integration/test_events.py) | 1,200 events delivered once, in order, across random reconnects; resync; WebSocket close codes; downloads and Range |
 | [tests/integration/test_retention.py](tests/integration/test_retention.py) | Exact logical expiry, both sweepers, retried deletes, orphans, Redis loss, quota recount |
 | [tests/integration/test_limits.py](tests/integration/test_limits.py) | The design's limits table, rate limits, photo reports, push only to members without a socket |
 | [tests/integration/test_acl.py](tests/integration/test_acl.py) | The Redis ACL file: each service can do its job and nothing else |
-| [tests/e2e/](tests/e2e/) | Login, create, join, upload, live event, download, dedupe, recall, end |
+| [tests/e2e/](tests/e2e/) | Login, create, join and key sharing, encrypted upload, live event, download and decryption, dedupe, recall, end |
 
 Benchmarks are in `tests/bench/`, skipped by the normal run: `scripts/bench.sh` runs them (about a minute) and writes [tests/bench/results/latest.md](tests/bench/results/latest.md).
 

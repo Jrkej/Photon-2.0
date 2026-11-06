@@ -1,0 +1,12 @@
+127.0.0.1:54976 - "WebSocket /v1/ws" [accepted]
+127.0.0.1:38206 - "POST /v1/photos/announce HTTP/1.1" 200 OK
+127.0.0.1:44340 - "PUT /v1/uploads/22097bb015054e2c8874a7d6ffa11a66/chunks/0 HTTP/1.1" 204 No Content
+127.0.0.1:38220 - "POST /internal/v1/photos/stored HTTP/1.1" 200 OK
+127.0.0.1:44340 - "POST /v1/uploads/22097bb015054e2c8874a7d6ffa11a66/complete HTTP/1.1" 200 OK
+127.0.0.1:38206 - "POST /v1/photos/announce HTTP/1.1" 200 OK
+127.0.0.1:44340 - "PUT /v1/uploads/9ec655316aec4bec99de5ce80dceffd0/chunks/0 HTTP/1.1" 204 No Content
+127.0.0.1:38220 - "POST /internal/v1/photos/stored HTTP/1.1" 200 OK
+127.0.0.1:44340 - "POST /v1/uploads/9ec655316aec4bec99de5ce80dceffd0/complete HTTP/1.1" 200 OK
+127.0.0.1:38232 - "POST /v1/photos/announce HTTP/1.1" 200 OK
+127.0.0.1:51648 - "WebSocket /v1/ws" [accepted]
+127.0.0.1:35958 - "DELETE /internal/v1/photos/JzTJvmyAkb--B98cmtQ64w/a6e1d483ff4eb9a61a35cd86e66820568c98c173b85d537d6322fbb746974df4 HTTP/1.1" 204 No Content

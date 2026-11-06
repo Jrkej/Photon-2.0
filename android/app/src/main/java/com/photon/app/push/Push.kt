@@ -66,7 +66,8 @@ class DeviceRegistrationWorker(context: Context, params: WorkerParameters) : Cor
 
 /**
  * A push is a hint that new events exist; it never carries photo data. Every message runs the
- * same catch-up as app start.
+ * same catch-up as app start, which ends with key maintenance: for `kind=joined` that is the
+ * point (a newcomer waits for a member to seal the session key for it, e2ee.md 5.1).
  */
 class PhotonMessagingService : FirebaseMessagingService() {
     override fun onMessageReceived(message: RemoteMessage) {

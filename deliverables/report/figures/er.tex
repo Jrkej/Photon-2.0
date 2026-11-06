@@ -1,0 +1,43 @@
+% Data model: Redis (session state) and Postgres (accounts)
+\begin{tikzpicture}[
+  ent/.style={draw=boxline, fill=white, rounded corners=2pt, align=left, inner sep=3pt, font=\scriptsize, text width=#1},
+  ent/.default=38mm,
+  hd/.style={fill=pblue, text=white, font=\scriptsize\bfseries, inner sep=3pt, rounded corners=2pt, align=left, text width=#1},
+  hd/.default=38mm]
+\def\E#1#2#3#4{\node[hd=#4] (#1h) at #2 {#3};}
+% Redis
+\node[hd] (s) at (0,0) {session:\{sid\} \hfill hash};
+\node[ent, below=0pt of s] (sb) {host, status (ACTIVE / ENDED)\\expires\_at, max\_members\\stored\_bytes, reserved\_bytes};
+\node[hd] (m) at (0,-2.35) {session:\{sid\}:members \hfill hash};
+\node[ent, below=0pt of m] (mb) {uid $\to$ role, joined\_at};
+\node[hd] (p) at (4.75,0) {session:\{sid\}:photos \hfill hash};
+\node[ent, below=0pt of p] (pb) {sha256 $\to$ status, uploader,\\upload\_id, size, stored\_at,\\expires\_at};
+\node[hd] (e) at (4.75,-2.35) {session:\{sid\}:events \hfill stream};
+\node[ent, below=0pt of e] (eb) {id = $\langle$ms$\rangle$-$\langle$seq$\rangle$, PhotoEvent\\trimmed by MINID};
+\node[hd] (u) at (9.5,0) {upload:\{sid\}:\{id\} \hfill hash};
+\node[ent, below=0pt of u] (ub) {uploader, sha256, size\\TTL = 15 min lease};
+\node[hd] (x) at (9.5,-2.35) {expiry:$n$ \hfill zset $\times 16$};
+\node[ent, below=0pt of x] (xb) {``sid:sha256'' scored by\\expires\_at};
+\begin{scope}[on background layer]
+\node[zone, fit=(s)(xb)(u)(mb), label={[zonet, anchor=south west]north west:Redis 7.2: all keys of a session share the \{sid\} hash slot}] {};
+\end{scope}
+% Postgres
+\node[hd=30mm, fill=greentab] (id) at (0,-5.3) {identities};
+\node[ent=30mm, below=0pt of id] (idb) {provider (PK)\\provider\_user\_id (PK)\\user\_id (FK)};
+\node[hd=30mm, fill=greentab] (us) at (4.2,-5.3) {users};
+\node[ent=30mm, below=0pt of us] (usb) {id (PK)\\display\_name, created\_at};
+\node[hd=30mm, fill=greentab] (dv) at (8.4,-5.3) {devices};
+\node[ent=30mm, below=0pt of dv] (dvb) {user\_id (FK), platform\\push token};
+\node[hd=30mm, fill=greentab] (pr) at (12.6,-5.3) {photo\_reports};
+\node[ent=30mm, below=0pt of pr] (prb) {session, sha256\\reporter (FK), reason};
+\begin{scope}[on background layer]
+\node[zone, fit=(id)(prb)(idb), label={[zonet, anchor=south west]north west:Postgres 16: durable accounts}] {};
+\end{scope}
+\draw[arr] (sb.east) -- node[lblc, above]{1 : n} (pb.west|-sb.east);
+\draw[arr] (pb.east) -- node[lblc, above]{1 : 1} (ub.west|-pb.east);
+\draw[arr] (sb.south) -- node[lblc, right]{1 : n} (m.north);
+\draw[dsh] (pb.south) -- node[lblc, right]{same script appends} (e.north);
+\draw[arr] (idb.east) -- node[lblc, above]{n : 1} (usb.west|-idb.east);
+\draw[arr] (dvb.west) -- node[lblc, above]{n : 1} (usb.east|-dvb.west);
+\draw[arr] (prb.south) -- ++(0,-0.35) -| node[lblc, above, pos=0.25]{n : 1} (usb.south);
+\end{tikzpicture}

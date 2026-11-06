@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import hashlib
 import io
 import random
 import statistics
@@ -27,6 +26,7 @@ from PIL import Image
 from photon.client.api import PhotonClient
 from photon.client.listener import Listener
 from photon.client.uploader import upload_bytes
+from photon.common import e2ee
 from photon.common.pb import photon_pb2 as pb
 
 
@@ -67,6 +67,9 @@ async def run(args: argparse.Namespace) -> None:
             await c.login_dev(f"lt{run_id}-{s}-{m}")
             await c.join(code=info.join_code)
             members.append((c, info.session_id))
+        await host.sync_keys(info.session_id)  # seal the session key for every member who joined (e2ee.md 5.3)
+        for c, sid in members[1:]:
+            await c.sync_keys(sid)
         return members
 
     print(f"setting up {args.sessions} sessions x {args.members} members ...")
@@ -77,7 +80,7 @@ async def run(args: argparse.Namespace) -> None:
 
             async def on_event(ev: pb.PhotoEvent, me: str = c.uid) -> None:
                 if ev.type == pb.PhotoEvent.PHOTO_STORED and ev.uploader_id != me:
-                    arrivals.setdefault(ev.sha256, []).append(time.monotonic())
+                    arrivals.setdefault(ev.photo_tag, []).append(time.monotonic())
 
             lst = Listener(c, sid, on_event)
             listeners.append(asyncio.create_task(lst.run(stop)))
@@ -91,7 +94,9 @@ async def run(args: argparse.Namespace) -> None:
             await asyncio.sleep(random.uniform(0, 2 * args.duration_s / max(1, args.photos)))
             data = await asyncio.to_thread(photo, index * 1000 + p, args.width, args.height)
             start = time.monotonic()
-            started_at[hashlib.sha256(data).digest()] = start
+            bundle = await c.current_bundle(sid)
+            if bundle:  # the file's hash is known only once it is encrypted; the photo tag is known now
+                started_at[e2ee.photo_tag(bundle.tag_key, data)] = start
             res = await upload_bytes(c, sid, data, "image/jpeg", int(time.time() * 1000))
             outcomes[res.outcome] = outcomes.get(res.outcome, 0) + 1
             if res.outcome == "STORED":

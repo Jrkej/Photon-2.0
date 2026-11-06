@@ -4,12 +4,13 @@ Oct 13, 2026 · @jrke
 
 ## Overview
 
-PHOTON syncs photos between the galleries of everyone in a live session: when one member takes a photo, it lands in every other member's gallery with no manual step. The rule that shapes the whole design: **a photo is announced to the session only after the image server has verified its SHA-256 and stored it.**
+PHOTON syncs photos between the galleries of everyone in a live session: when one member takes a photo, it lands in every other member's gallery with no manual step. The rule that shapes the whole design: **a photo is announced to the session only after the image server has verified its SHA-256 and stored it.** A second rule came with end-to-end encryption: **a photo is encrypted on the phone that took it, and the servers store, verify and serve only files they cannot read** (see [End-to-end encryption](#end-to-end-encryption) and [e2ee.md](e2ee.md)).
 
 **Goals**
 
 - Detect a newly captured photo on the device and sync it while the user is in a session.
-- Upload each photo once per session (SHA-256 dedupe).
+- Upload each photo once per session (dedupe by photo tag, a keyed hash of the original).
+- Keep photos private from the operator: the servers never see a photo, a thumbnail or a key that opens one.
 - Show a thumbnail first, then a preview, then save the original, depending on the network.
 - Keep server copies short-lived: a photo is unavailable 30 minutes after it is stored (configurable) and its file is deleted within 5 minutes after that.
 
@@ -35,9 +36,9 @@ The client talks to the orchestrator over HTTPS and WebSocket and to the image s
 
 | Component | Owns | Never does |
 | --- | --- | --- |
-| Client | Gallery events, upload queue, local received-hash set | Decide what counts as a duplicate |
-| Orchestrator | Sessions, members, photo status, event fan-out | Touch image bytes |
-| Image server | Image bytes, thumbnails and previews, deletion | Change session state or notify members |
+| Client | Gallery events, upload queue, local received-hash set, its identity key and session keys, thumbnails, previews, encryption and decryption | Decide what counts as a duplicate |
+| Orchestrator | Sessions, members, photo status, event fan-out, the key relay (public keys and sealed keys) | Touch image bytes, or hold a key that opens anything |
+| Image server | Encrypted files, serving them and their thumbnail and preview prefixes, deletion | Read a photo, change session state or notify members |
 | Auth | The signing key, token issuing | Sit in the path of every request |
 
 ## Core flows
@@ -48,13 +49,15 @@ Other members hear about a photo only after the image server has verified its SH
 
 The image server, not the orchestrator, judges the hash. The orchestrator marks the photo `STORED` only when the image server's report arrives carrying the live reservation's `upload_id` while the session is still `ACTIVE`. Any other report is ignored, and the image server deletes that upload's files.
 
-**Announce outcomes.** `UPLOAD`: the hash is new, so it is reserved (its bytes are counted against the session quota) and the client gets an upload token. If the same user announces again while their own upload is live, they get the same `upload_id` and a fresh token. `ALREADY_UPLOADED`: the hash is `STORED` or `EXPIRED` in this session, so the client records it locally and stops. `IN_PROGRESS`: another member's upload of this hash is live, so the client waits for the event. A recalled hash answers `410 PHOTO_RECALLED`, and an ended session answers `410 SESSION_ENDED`.
+**Encrypt, then announce.** The uploader's app makes the thumbnail (WebP, at most 320 px) and the preview (WebP, at most 1,600 px, or empty when the original is no larger), and encrypts them with the original into one file under the session's current key epoch. The SHA-256 of that encrypted file is the photo's id everywhere: announce, upload token, events, downloads and recall. The announce carries it with `mime = application/vnd.photon.e2ee`, the photo tag and the key epoch ([e2ee.md §7](e2ee.md#7-upload-step-by-step-client)).
+
+**Announce outcomes.** `UPLOAD`: the photo is new (neither its hash nor its photo tag is known in the session), so it is reserved (its bytes are counted against the session quota) and the client gets an upload token. If the same user announces again while their own upload is live, they get the same `upload_id` and a fresh token. `ALREADY_UPLOADED`: the hash or the tag is `STORED` or `EXPIRED` in this session, so the client records it locally and stops. `IN_PROGRESS`: another member's upload of this photo is live, so the client waits for the event. A recalled photo answers `410 PHOTO_RECALLED`, and an ended session answers `410 SESSION_ENDED`. Before any of these, announce checks the key epoch: `409 KEY_ROTATION_REQUIRED` after a member left, `409 KEY_EPOCH_STALE` for a file encrypted under an older epoch, and `403 KEY_REQUIRED` while the uploader holds no key for the current epoch.
 
 **Login.** The client asks `POST /v1/auth/oauth/start` for an authorization URL carrying a fresh `state` and PKCE challenge, opens it in the system browser, and receives the redirect on a registered HTTPS app link. It then posts the `code`, the `state` and its `code_verifier` to `/v1/auth/oauth/callback`. Auth checks that the `state` exists and is unused, that the verifier matches the challenge, and that the redirect URI is the registered one, then exchanges the code with the provider. It finds or creates the user by `(provider, provider_user_id)` and returns an access JWT and a refresh token.
 
-**Join.** The client sends a code or invite token to `/v1/sessions/join`. One script checks that the session is `ACTIVE` and not full and that the user has no other live session, then adds the member. The client opens the WebSocket, loads the snapshot, resumes from its cursor, and starts watching the gallery.
+**Join.** The client sends a code or invite token, with its X25519 public key (`member_key`), to `/v1/sessions/join`. One script checks that the session is `ACTIVE` and not full and that the user has no other live session, then adds the member and appends `MEMBER_JOINED` carrying the key. The client opens the WebSocket, loads the snapshot, resumes from its cursor, and starts watching the gallery. It can upload and decrypt once a member's app has sealed the session key for it (`KEY_SHARED`); until then it waits.
 
-**Receive.** On an event the client drops anything it has already processed (by `event_id` and by hash), fetches the thumbnail by hash with its JWT, then the preview or original depending on the network, and saves only the original to the gallery. `PHOTO_RECALLED` removes cached copies; `SESSION_ENDED` stops syncing.
+**Receive.** On an event the client drops anything it has already processed (by `event_id` and by hash), fetches the thumbnail by hash with its JWT, then the preview or original depending on the network, and decrypts each with the key of the file's epoch. It checks the original against the event's photo tag and saves only the original to the gallery. `PHOTO_RECALLED` removes cached copies; `SESSION_ENDED` stops syncing.
 
 ## Protocols and APIs
 
@@ -76,19 +79,21 @@ The WebSocket at `/v1/ws` authenticates with the access JWT in its first frame, 
 | `POST /v1/auth/oauth/start` | client | Create a login attempt; returns the provider URL with `state` and PKCE challenge |
 | `POST /v1/auth/oauth/callback` | client | Send code, state and code verifier; get access and refresh tokens |
 | `POST /v1/auth/refresh` | client | Rotate the refresh token, issue a new access token |
-| `POST /v1/sessions` | client | Create a session; returns code, invite link, QR payload |
-| `POST /v1/sessions/join` | client | Join by code or invite token |
+| `POST /v1/sessions` | client | Create a session with the creator's public key; returns code, invite link, QR payload |
+| `POST /v1/sessions/join` | client | Join by code or invite token, with the joiner's public key |
 | `POST /v1/sessions/leave` | client | Leave the session |
 | `GET /v1/sessions/{sid}/snapshot` | client | Members, live photos, recalled hashes and an event cursor; used on join and on resync |
 | `GET /v1/sessions/{sid}/events?since=` | client | Events after an id (used after a push wake-up); `410 RESYNC_REQUIRED` if the id is no longer retained |
-| `POST /v1/photos/announce` | client | Send hash and metadata; get `UPLOAD`, `ALREADY_UPLOADED` or `IN_PROGRESS` |
+| `GET /v1/sessions/{sid}/keys` | client | The current key epoch, whether a rotation is required, members' public keys and newest held epochs, and the caller's own sealed keys |
+| `POST /v1/sessions/{sid}/keys` | client | Share sealed keys with members who lack an epoch, or start the next epoch (rotation); the server can open none of them |
+| `POST /v1/photos/announce` | client | Send the encrypted file's hash, its photo tag and key epoch, and metadata; get `UPLOAD`, `ALREADY_UPLOADED` or `IN_PROGRESS` |
 | `POST /v1/sessions/{sid}/photos/{hash}/recall` | client | Uploader or host stops distribution of a photo |
 | `PUT /v1/uploads/{upload_id}/chunks/{n}` | client to image server | Upload one chunk with the upload token |
 | `GET /v1/uploads/{upload_id}` | client to image server | Upload state and received chunks, so an upload can resume |
 | `POST /v1/uploads/{upload_id}/complete` | client to image server | Idempotent: `202` while verifying, `200` with the stored result on every repeat, the same `422` on repeat after a rejection |
-| `GET /v1/sessions/{sid}/photos/{hash}?size=` | client to image server | Download `thumb`, `preview` or `full`; JWT, membership, status and expiry checked on every request |
-| `POST /internal/v1/photos/stored` | image server to orchestrator | Hash verified and saved; carries `upload_id`; fenced |
-| `POST /internal/v1/photos/rejected` | image server to orchestrator | Hash mismatch or invalid file; carries `upload_id`; fenced |
+| `GET /v1/sessions/{sid}/photos/{hash}?size=` | client to image server | Download `thumb` or `preview` (byte prefixes of the encrypted file) or `full`; JWT, membership, status and expiry checked on every request |
+| `POST /internal/v1/photos/stored` | image server to orchestrator | Hash verified, header checked and file saved; carries `upload_id`; fenced |
+| `POST /internal/v1/photos/rejected` | image server to orchestrator | Hash mismatch or invalid encrypted file; carries `upload_id`; fenced |
 | `DELETE /internal/v1/photos/{sid}/{hash}` | orchestrator to image server | Delete after expiry, recall or session end; idempotent, retried until acknowledged |
 
 **Error contract.** Every error body is the `Error` message below. The client retries only when `retryable` is true, and waits `retry_after_s` when it is set.
@@ -98,12 +103,14 @@ The WebSocket at `/v1/ws` authenticates with the access JWT in its first frame, 
 | 400 | `INVALID_REQUEST` | Malformed request or missing chunks (the body lists them) | Fix the request; do not blind-retry |
 | 401 | `TOKEN_EXPIRED`, `UNAUTHENTICATED` | Missing, invalid or expired JWT | Refresh once, then retry |
 | 403 | `NOT_A_MEMBER`, `FORBIDDEN` | Not in this session, or not allowed to do this | Stop; rejoin if the session still exists |
+| 403 | `KEY_REQUIRED` | The caller holds no key for the session's current epoch yet | Wait for `KEY_SHARED`, then try again |
 | 404 | `UNKNOWN_UPLOAD`, `PHOTO_NOT_FOUND` | No such upload or photo; also returned to non-members so existence is not leaked | Drop the local task |
 | 409 | `ALREADY_IN_SESSION`, `UPLOAD_SUPERSEDED`, `UPLOAD_FINALIZED` | The upload id is no longer the live one, or the upload is already finished | Stop this upload; re-announce only if the photo is still unsynced |
+| 409 | `KEY_ROTATION_REQUIRED`, `KEY_EPOCH_STALE`, `EPOCH_TAKEN` | A member left and the key must rotate; the file used an older epoch; another member rotated first | Rotate, or fetch the current key; rebuild the file and announce again |
 | 410 | `SESSION_ENDED`, `PHOTO_EXPIRED`, `PHOTO_RECALLED`, `UPLOAD_EXPIRED`, `RESYNC_REQUIRED` | Final: the thing is gone | Clear local state; for `RESYNC_REQUIRED` load the snapshot |
 | 413 | `TOO_LARGE` | Over the size limit | Stop; do not retry |
-| 415 | `UNSUPPORTED_FORMAT` | Type not on the allow-list | Stop |
-| 422 | `HASH_MISMATCH`, `INVALID_IMAGE` | File rejected | Stop; counts as a strike for the uploader |
+| 415 | `UNSUPPORTED_FORMAT` | The announce isn't of the encrypted type `application/vnd.photon.e2ee` | Stop |
+| 422 | `HASH_MISMATCH`, `INVALID_IMAGE` | File rejected: wrong hash, or not a valid encrypted file for the announced epoch | Stop; counts as a strike for the uploader |
 | 429 | `RATE_LIMITED`, `TOO_MANY_UPLOADS`, `QUOTA_EXCEEDED` | Limit reached | Retry after `Retry-After`; quota frees as photos expire |
 | 503 | `BUSY`, `PROCESSING_FAILED` | Temporary server condition | Retry with backoff and jitter |
 
@@ -111,10 +118,13 @@ The WebSocket at `/v1/ws` authenticates with the access JWT in its first frame, 
 
 ```proto
 message AnnounceRequest {
-  bytes  sha256       = 1;
+  bytes  sha256       = 1;   // of the encrypted file
   uint64 size         = 2;
-  string mime         = 3;
+  string mime         = 3;   // always application/vnd.photon.e2ee
   int64  taken_at_ms  = 4;
+  string session_id   = 5;
+  bytes  photo_tag    = 6;   // keyed hash of the original, for dedupe
+  uint32 key_epoch    = 7;   // must be the session's current epoch
 }
 
 message AnnounceResponse {
@@ -147,7 +157,8 @@ message PhotoRejected {        // image server -> orchestrator
 
 message PhotoEvent {           // orchestrator -> members
   enum Type { PHOTO_STORED = 0; PHOTO_RECALLED = 1; MEMBER_JOINED = 2;
-              MEMBER_LEFT = 3; SESSION_ENDED = 4; }
+              MEMBER_LEFT = 3; SESSION_ENDED = 4; HOST_CHANGED = 5;
+              KEY_SHARED = 6; KEY_ROTATED = 7; }
   string event_id      = 1;    // Redis stream id, increasing per session
   Type   type          = 2;
   string session_id    = 3;
@@ -157,6 +168,9 @@ message PhotoEvent {           // orchestrator -> members
   int64  taken_at_ms   = 7;
   int64  expires_at_ms = 8;
   string member_id     = 9;
+  bytes  member_key    = 10;   // MEMBER_JOINED: the member's X25519 public key
+  uint32 key_epoch     = 11;   // PHOTO_STORED: the file's epoch; KEY_*: the epoch
+  bytes  photo_tag     = 12;   // PHOTO_STORED: receivers check it
 }
 
 message Snapshot {
@@ -164,6 +178,7 @@ message Snapshot {
   repeated PhotoEvent live_photos  = 2;  // STORED and not yet expired
   repeated bytes recalled_sha256   = 3;
   repeated string member_ids       = 4;
+  uint32 key_epoch                 = 5;  // the session's current key epoch
 }
 
 message Error {
@@ -174,7 +189,7 @@ message Error {
 }
 ```
 
-`PhotoEvent` carries no download URL. Receivers fetch by hash with their own JWT, so a leaked event is useless on its own. `IN_PROGRESS` means someone else has a live upload of the same hash; the client waits for the event instead of uploading.
+`PhotoEvent` carries no download URL and no key. Receivers fetch by hash with their own JWT, so a leaked event is useless on its own. The key messages (`KeyState`, `KeyUpload`, `SealedKey`, `MemberKey`) are in [proto/photon.proto](proto/photon.proto) and [e2ee.md §5.1](e2ee.md#51-endpoints-and-events). `IN_PROGRESS` means someone else has a live upload of the same hash; the client waits for the event instead of uploading.
 
 ## Data model
 
@@ -182,10 +197,12 @@ Redis holds session state, which is short-lived by design; Postgres holds accoun
 
 | Key | Type | Holds | Lifetime |
 | --- | --- | --- | --- |
-| `session:{sid}` | hash | Host, status (`ACTIVE` or `ENDED`), created\_at, expires\_at, max\_members, `stored_bytes`, `reserved_bytes` | Session expiry, then an `ENDED` tombstone for 1 hour so late callers get `410`, not `404` |
-| `session:{sid}:members` | hash | uid to role and joined\_at | Session expiry |
-| `session:{sid}:photos` | hash | sha256 to status, uploader, upload\_id, size, reserved\_at, stored\_at, expires\_at | Session expiry |
-| `session:{sid}:events` | stream | Photo and membership events; trimmed by age (`MINID`) to retention plus 1 hour | Session expiry |
+| `session:{sid}` | hash | Host, status (`ACTIVE` or `ENDED`), created\_at, expires\_at, max\_members, `stored_bytes`, `reserved_bytes`, the current key `epoch`, and `rotate` (a member left, so the next uploader must start a new epoch) | Session expiry, then an `ENDED` tombstone for 1 hour so late callers get `410`, not `404` |
+| `session:{sid}:members` | hash | uid to role, joined\_at, the member's public key (`pk`) and the newest key epoch it holds (`ke`) | Session expiry |
+| `session:{sid}:photos` | hash | sha256 to status, uploader, upload\_id, size, photo tag, key epoch, reserved\_at, stored\_at, expires\_at | Session expiry |
+| `session:{sid}:tags` | hash | Photo tag to sha256, so the same photo in a different file dedupes | Session expiry |
+| `session:{sid}:keys` | hash | `epoch:uid` to a sealed key (`box`) and who sealed it (`from`). A member's boxes are deleted when they leave, are kicked, or rejoin from a new install | Session expiry |
+| `session:{sid}:events` | stream | Photo, membership and key events; trimmed by age (`MINID`) to retention plus 1 hour | Session expiry |
 | `upload:{sid}:{upload_id}` | hash | Uploader, sha256, size, state (`RECEIVING`, `VERIFYING`, `STORED`, `REJECTED`), chunk bitmap | A 15-minute lease, refreshed by every chunk; its absence means the upload is stale |
 | `expiry:{n}` | sorted set | `sid:sha256` scored by expires\_at; `n` is a shard from the session id | Entry stays until the image server acknowledges the deletion |
 | `user:{uid}:session` | string | Current session id, set with `NX` so a user can be in one session only | Session expiry |
@@ -200,7 +217,7 @@ Redis holds session state, which is short-lived by design; Postgres holds accoun
 
 **Photo status in `session:{sid}:photos`**
 
-1. Absent to `UPLOADING`: announce reserves the hash with `HSETNX` and records the `upload_id`. If the entry is already `UPLOADING` but its `upload:{sid}:{upload_id}` lease is gone and the reservation is older than 60 seconds, the new announce takes over with a new `upload_id`, after releasing the old reserved bytes.
+1. Absent to `UPLOADING`: announce reserves the hash with `HSETNX`, records the `upload_id`, and maps the photo tag to the hash in `session:{sid}:tags`. If the entry is already `UPLOADING` but its `upload:{sid}:{upload_id}` lease is gone and the reservation is older than 60 seconds, the new announce takes over with a new `upload_id`, after releasing the old reserved bytes. A tag that already names another hash answers as that hash would (`ALREADY_UPLOADED`, `IN_PROGRESS` or `410 PHOTO_RECALLED`), except that the uploader's own unfinished reservation is released and replaced: a lost file can only be rebuilt with a new hash, because every file has a random photo key.
 2. `UPLOADING` to `STORED`: only on a `stored` report whose `upload_id` and sha256 equal the entry, while the session is `ACTIVE` and the uploader is still a member. In the same script it appends the event, so `STORED` exists exactly when its event does.
 3. `UPLOADING` back to absent: on a `rejected` report with the same `upload_id`, when the lease goes stale, or when the session ends. A report with any other `upload_id` changes nothing, so a slow old uploader can never clear a newer reservation.
 4. `STORED` to `EXPIRED` (sweeper) or `RECALLED` (uploader or host). Both stay as tombstones until the session ends, so a late announce of the same hash does not re-upload it.
@@ -213,6 +230,7 @@ Redis holds session state, which is short-lived by design; Postgres holds accoun
 - Lost join or membership: the next call returns `403 NOT_A_MEMBER` or `410 SESSION_ENDED`; the client rejoins with the code if the session still exists.
 - Lost reservation or photo status: the uploader re-announces and gets a new `upload_id`. If the image server already holds a verified file for the same session and sha256, `complete` skips reassembly and re-reports `stored`.
 - Lost expiry entries: the image server's own sweeper still deletes at `expires_at`.
+- Lost key changes: a lost share is sealed again by the next key maintenance. A lost rotation leaves `rotate` set, so the next uploader rotates again with a fresh key.
 - Lost events or a missing stream: clients get `RESYNC_REQUIRED` and load the snapshot.
 - Counter drift: corrected by the periodic recount.
 
@@ -250,17 +268,51 @@ There are no shareable links. Every `GET /v1/sessions/{sid}/photos/{hash}` reque
 
 The client's hash is a claim, not a fact. The image server recomputes SHA-256 over the assembled bytes and stores the file only if it equals the announced hash (see Image pipeline). Otherwise a member could announce hash X, upload other bytes, and make everyone's real photo X look "already uploaded".
 
+With end-to-end encryption the hash is over the encrypted file, and dedupe moved to the photo tag, which the server can't check without the session's tag key. A member could label a file with another photo's tag to block that photo. Receivers recompute the tag from the decrypted original and flag a mismatch ([e2ee.md §6.2](e2ee.md#62-identity-and-dedupe)).
+
 **Joining and leaving**
 
 - Short codes are guessable: use 8 base32 characters, rate-limit joins per user and per IP, and expire the code.
 - Invite links carry a random 128-bit token with expiry; the host can revoke. A QR code just encodes the invite link, opened through App Links or Universal Links.
 - Roles: host and member. The host can kick, end the session, and set `max_members`.
-- Kicking a member is one script: remove the member, release their live reservations, close their socket, append `MEMBER_LEFT`. Their in-flight uploads then fail the membership check.
+- Kicking a member is one script: remove the member, release their live reservations, delete their sealed keys, close their socket, append `MEMBER_LEFT`, and require a key rotation. Their in-flight uploads then fail the membership check, and they never receive the next epoch's key.
 - If the host leaves, the host role passes to the longest-present member; if nobody is left, the session ends.
 
 **Transport**
 
 TLS 1.3 on every hop. Redis is never exposed publicly: private network, TLS, ACL user per service. Service-to-service calls use mTLS or signed service tokens. Server clocks are NTP-synchronised because `expires_at` is compared across the image server and the orchestrator.
+
+## End-to-end encryption
+
+Photos are encrypted on the uploader's phone and decrypted on members' phones. The orchestrator relays keys it can't open, and the image server stores files it can't read. This section is the design summary; the byte layouts, the sealing construction and the test vectors are in [e2ee.md](e2ee.md).
+
+**What the servers see.** Not the photos, thumbnails or previews, the real image type and dimensions, or any key that opens them. They still see metadata: who is in which session and when, encrypted file sizes, capture times, key epochs, and photo tags (equal tags mean the same photo, without saying which). See [e2ee.md §1](e2ee.md#1-what-it-protects-and-from-whom) and [§10](e2ee.md#10-limits-and-trade-offs).
+
+**Keys**
+
+- Each install has an X25519 identity key pair. The private key never leaves the device. The public key (`member_key`) is sent when creating or joining a session, and `MEMBER_JOINED` carries it to the members.
+- A session has epoch keys `K_1, K_2, …` (AES-256) and one tag key `D` that never rotates. The creator's phone makes `K_1` and `D`.
+- A sealed box (117 bytes) carries one epoch's key and `D` to one member: X25519 with a fresh ephemeral key, HKDF-SHA256 and AES-256-GCM, bound to the session, the member and the epoch ([e2ee.md §4](e2ee.md#4-sealing-a-bundle-for-one-member)).
+
+**Relaying keys.** Boxes go through `GET` and `POST /v1/sessions/{sid}/keys`. Every client runs *key maintenance* after creating or joining, on `MEMBER_JOINED`, on `KEY_SHARED` for itself, on `KEY_ROTATED`, on a `joined` push and on every app start. It opens the boxes sealed for it, then seals every epoch it holds for each member whose newest epoch is lower. The first sealer wins: a box for a member who already has that epoch is ignored, so concurrent sealers are harmless. Each stored box appends `KEY_SHARED`. A newcomer can't upload or decrypt until a member who holds the key is online; the push `kind=joined` wakes members without a live socket.
+
+**Rotation.** Leaving and kicking set `rotate` whenever members remain, and announce then answers `409 KEY_ROTATION_REQUIRED`. The uploader makes `K_{e+1}`, keeps `D`, seals the new key for every member (itself included, so a crash after the call loses nothing), and posts it with `rotate = true`. The server requires `epoch = current + 1`, or answers `409 EPOCH_TAKEN` (the loser fetches the winner's key), and a box for every other member. A lone remaining member may rotate with no boxes. Success sets every member's epoch, clears `rotate` and appends `KEY_ROTATED`. A member's boxes are deleted when they leave, are kicked, or rejoin from a new install with a new member key, so members seal for them afresh ([e2ee.md §5](e2ee.md#5-relaying-keys-through-the-server)).
+
+**The file.** One file per photo: an 85-byte plaintext header (version, epoch, a random photo key locked under `K_epoch`, and four section lengths), then four AES-256-GCM sections: metadata, thumbnail, preview and original. The whole header is every section's associated data. The image server serves `thumb` and `preview` as byte prefixes of the file, and the receiver decrypts a prefix with the same steps as the whole file ([e2ee.md §6](e2ee.md#6-the-encrypted-photo-file)).
+
+**Dedupe by photo tag.** `tag = HMAC-SHA256(D, "photon/tag/v1" ‖ SHA-256(original))`. The same photo from two phones gives two different files with one tag, and the orchestrator dedupes on the tag in `session:{sid}:tags`.
+
+**A random photo key per file.** An earlier plan derived the photo key from `K` and the photo's hash, so equal photos would produce equal files and dedupe by file hash. Two phones make different thumbnails from the same photo, though, so a derived key with fixed nonces would encrypt different plaintexts under the same key and nonce. That breaks AES-GCM: it leaks the XOR of the plaintexts and allows forgeries. So every file gets a fresh random key, locked in its own header, and dedupe moved to the tag.
+
+**What the servers check** ([e2ee.md §8](e2ee.md#8-what-the-server-checks)). Announce: the encrypted type, a 32-byte tag, `key_epoch` equal to the current epoch, the caller holding it, and no rotation pending. The upload token carries `key_epoch`. On `complete`, the image server checks the hash, then the header: version 1, the token's epoch, sane section lengths, and lengths that add up to the file size. A bad header is `422 INVALID_IMAGE`.
+
+**Limits.**
+
+- The servers can no longer screen images. A member could upload a well-formed file that isn't a valid image, so **receivers decode decrypted images defensively** and treat a failure as a failed photo.
+- A report can't include content the server can't read; it records the hash and the reason only.
+- Keys rotate when a member leaves or is kicked, not per message; sessions are short and photos expire after 30 minutes. A newcomer also receives the earlier epochs, so it can read live photos taken before it joined.
+- Members can compare security codes (a fingerprint of each member key) to confirm the server delivered the real keys ([e2ee.md §9](e2ee.md#9-security-codes)).
+- The Python reference client and the Android app implement the protocol. **The iOS app doesn't yet**, so it can't create, join or upload in a session until it is updated.
 
 ## Reliability
 
@@ -269,7 +321,7 @@ Every step is idempotent and resumable, so a crash or retry at any point leaves 
 **Announce and dedupe**
 
 - `announce` is idempotent: the same user and hash in the same session get the same `upload_id` while their reservation lives, with a fresh token.
-- The reservation is one Lua script: check the session is `ACTIVE`, check membership, check the live-upload limits, reserve quota, then `HSETNX` the hash. If two members announce the same hash at once, one gets `UPLOAD` and the other `IN_PROGRESS` and waits for the event.
+- The reservation is one Lua script: check the session is `ACTIVE`, check membership, check the key epoch, check the hash and the photo tag, check the live-upload limits, reserve quota, then `HSETNX` the hash. If two members announce the same photo at once (equal tags, different files), one gets `UPLOAD` and the other `IN_PROGRESS` and waits for the event.
 - If the uploader dies, its lease key expires and the next announce takes over with a new `upload_id` (see Data model). The old upload's later reports are fenced out.
 
 **Upload**
@@ -315,8 +367,10 @@ The server promises ordering and safety. Whether a phone notices a photo, and ho
 
 | Property | The server guarantees | Best effort only |
 | --- | --- | --- |
-| Verified before announced | A photo is announced only after its hash is verified and the file is saved | Nothing |
-| One copy per session | A hash is stored once per session | Client-side echo prevention |
+| Verified before announced | A photo is announced only after the hash of its encrypted file is verified, its header checked and the file saved | Nothing |
+| One copy per session | Each hash and each photo tag is stored once per session | Client-side echo prevention; a file labelled with another photo's tag is caught only by receivers |
+| Confidentiality | The servers hold no key that opens a photo, a thumbnail or a sealed key | Keys stay safe on members' devices; members compare security codes to rule out a substituted key |
+| Key rotation | After a leave or kick, no photo is accepted until a member starts an epoch the departed member never receives | Photos from earlier epochs stay readable to whoever held that epoch |
 | Event delivery | Events are appended to a durable stream and delivered at-least-once; any client can recover fully from the snapshot | Live push over WebSocket and FCM or APNs |
 | Detecting a new photo | Nothing | Android while the app may run; iOS only while the app is alive or on its next launch |
 | Latency | None promised | Typically as fast as the network allows |
@@ -329,11 +383,11 @@ The server promises ordering and safety. Whether a phone notices a photo, and ho
 
 The image server saves a file only after its SHA-256 matches the announced hash, and it tells the orchestrator only after the file is saved and its metadata is written. Until then the photo does not exist for anyone else in the session.
 
-**Accepted images**
+**Accepted files**
 
-- Formats on the allow-list: JPEG, PNG, WebP and HEIC/HEIF, static images only. Animated or multi-frame files are rejected.
-- Limits (proposed): 25 MB per file and 100 megapixels. The declared type must match the type detected from the magic bytes.
-- Decoding runs in a separate worker process with memory, CPU-time and wall-clock limits, so a malicious file can exhaust only that worker. A decode failure or a limit hit is `INVALID_IMAGE`.
+- One type only: the encrypted photo file, announced as `application/vnd.photon.e2ee`. The image server reads only its plaintext header and never decodes an image; it has no image code at all.
+- Limit (proposed): 25 MB per file.
+- The uploader's app checks the photo before encrypting it: JPEG, PNG, WebP or HEIC/HEIF, static images only, at most 100 megapixels, with the declared type matching the magic bytes. It also makes the thumbnail and preview (EXIF orientation applied, no metadata). Receivers decode what they decrypt defensively, because no server screened it.
 
 **Temporary storage and concurrency**
 
@@ -346,12 +400,11 @@ The image server saves a file only after its SHA-256 matches the announced hash,
 1. Check the lease, that the session is `ACTIVE` and that the uploader is still a member, all uncached. Record the state `VERIFYING` on disk. If the state is already final, return the stored result (see Reliability).
 2. Assemble the chunks into a temporary file. Check that every index is present and the total equals the announced size. Stream SHA-256 over it and compare with the `sha256` in the upload token.
 3. On a mismatch: delete the temporary files, record `REJECTED`, return `422 HASH_MISMATCH`, and report `rejected` with the `upload_id`. The orchestrator clears the reservation (if the id is still live), releases the quota and counts a strike against the uploader. Nothing is announced.
-4. On a match: check format, size, dimensions and decodability as described above. A failure is handled like step 3, with `INVALID_IMAGE`.
+4. On a match: parse the file's 85-byte header. It must be version 1, carry the epoch named in the upload token, have sane section lengths, and have lengths that add up to the file size. A failure is handled like step 3, with `INVALID_IMAGE`.
 5. Move the file to its final path with an atomic rename and fsync. If a verified file for the same session and sha256 already exists (for example after a Redis loss), reuse it instead of storing a second copy.
-6. Generate the thumbnail (apply EXIF orientation, strip metadata), retrying up to 3 times. If it keeps failing for a transient reason (memory, disk, timeout), keep the verified original under its `upload_id` path, record `VERIFIED`, and answer `503 PROCESSING_FAILED`. The client's next `complete` resumes at this step without re-hashing. After 3 failed attempts in total the upload is rejected as `INVALID_IMAGE` and deleted. A photo is never announced without a thumbnail.
-7. Write the metadata file next to the original (sha256, size, uploader, `stored_at`, `expires_at = stored_at + retention`) and fsync it. Then write the pending-report record and send `stored` with `upload_id`, `stored_at` and `expires_at`. The orchestrator adopts the image server's `expires_at`.
+6. Write the metadata file next to the file (sha256, size, uploader, key epoch, header length and section lengths, `stored_at`, `expires_at = stored_at + retention`) and fsync it. Then write the pending-report record and send `stored` with `upload_id`, `stored_at` and `expires_at`. The orchestrator adopts the image server's `expires_at`.
 
-The preview is generated on first request and cached. If that fails, the request gets `503` and the client falls back to the thumbnail or the original. Derived images never carry metadata; the original keeps its EXIF unless the client stripped location before upload (the default, see Client).
+A photo can't be stored without a thumbnail, because the header check refuses an empty thumbnail section. Downloads serve the stored file as `application/octet-stream`: `full` is the whole file (with `Range`), and `thumb` and `preview` are its first bytes up to the end of that section, computed from the lengths in the metadata ([e2ee.md §6.3](e2ee.md#63-serving-sizes-without-decrypting)). Nothing is generated on request. The original keeps its EXIF unless the client stripped location before upload (the default, see Client); the thumbnail and preview never carry metadata.
 
 **Retention: what 30 minutes means**
 
@@ -374,12 +427,12 @@ The client must be a native app, because only the operating system can tell it t
 **Android: who does what**
 
 - The observer only notices. A `MediaStore` ContentObserver, kept alive by a foreground service with a visible notification while a session is active (Android 8 and later kill plain background services), writes `(media_id, date_added, uri)` to a local `pending_photos` table and enqueues work. It does no hashing and no network calls.
-- WorkManager owns everything slow: hashing, announce, chunked upload, retries and backoff. Jobs are persisted, wait for the network, and survive the app being killed.
+- WorkManager owns everything slow: thumbnails, encryption, hashing, announce, chunked upload, retries and backoff. Jobs are persisted, wait for the network, and survive the app being killed.
 - A reconcile scan covers what the observer missed. On session start, app start, service restart and after boot, it queries `MediaStore` for images taken after the join time and after the last scan cursor that are not already pending, synced or received, and enqueues them.
 
 **iOS: no promise while suspended**
 
-`PHPhotoLibraryChangeObserver` works only while the app is alive. While the app is suspended nothing is synced and nothing is guaranteed. On the next launch or return to the foreground the app runs the same reconcile scan (assets created after the join time that it has not synced or received) and then the snapshot catch-up. A silent push may wake the app briefly but is never relied on. Photos taken while suspended reach the others late, as soon as they are uploaded and verified.
+The iOS app doesn't implement end-to-end encryption yet, so until it is updated it can't create, join or upload in a session (see End-to-end encryption). What follows is its design once it does. `PHPhotoLibraryChangeObserver` works only while the app is alive. While the app is suspended nothing is synced and nothing is guaranteed. On the next launch or return to the foreground the app runs the same reconcile scan (assets created after the join time that it has not synced or received) and then the snapshot catch-up. A silent push may wake the app briefly but is never relied on. Photos taken while suspended reach the others late, as soon as they are uploaded and verified.
 
 On both platforms only photos with a capture time after the join time and before the session end are eligible. Screenshots and downloads are skipped by filtering on the camera folder and capture time.
 
@@ -390,12 +443,13 @@ A received photo saved to the gallery fires the same observer, and a hash alone 
 1. Asset identity: every photo the app saves is recorded by its `MediaStore` id or `PHAsset` identifier in a `received_assets` table, and events and scans skip those ids.
 2. Location: received photos are saved to a dedicated PHOTON folder (Android) or album (iOS), and the observer and scan skip that location.
 3. Owner: on Android, ignore rows whose owner package is the app itself.
-4. Hash set: a local set of received and uploaded hashes, as a last local check only.
-5. Server: the session-wide hash dedupe, which still catches an exact duplicate.
+4. Hash set: a local set of received and uploaded hashes and photo tags, as a last local check only.
+5. Server: the session-wide dedupe by photo tag, which still catches the same photo from any member.
 
 **Receiving**
 
-- Show the thumbnail as soon as the event arrives, then the preview, then the original, depending on network quality. Thumbnails and previews live in the app cache only. Save just the original to the gallery, otherwise each photo appears three times.
+- Show the thumbnail as soon as the event arrives, then the preview, then the original, depending on network quality. Each is decrypted on the device; a small original has no separate preview, so the client fetches the original instead. Thumbnails and previews live in the app cache only. Save just the original to the gallery, otherwise each photo appears three times.
+- Decode decrypted images defensively (size and pixel limits, a decoder failure marks the photo failed), and check the original against the event's photo tag before saving it.
 - Fetch originals on Wi-Fi or while charging when the user chooses that setting. Keep the original capture time on the saved file so it lands in the right place in the timeline.
 - Process events idempotently: drop an `event_id` already seen and a hash already held. Recovery after a missed push, a reconnect or a restart is the catch-up described in Reliability.
 
@@ -416,7 +470,7 @@ Without limits, PHOTON becomes free file hosting. These are proposed defaults to
 
 | Limit | Proposed default | Enforced by |
 | --- | --- | --- |
-| Maximum photo size | 25 MB, 100 megapixels | Upload token `size`, then the image server's validation |
+| Maximum photo size | 25 MB per encrypted file; 100 megapixels | Upload token `size` and the image server's header check; the pixel limit is checked by the apps, because the servers can't see pixels |
 | Members per session | 10 | Orchestrator, on join |
 | Bytes per session | 1 GB of stored plus reserved bytes | Orchestrator, reserved at announce, converted on `stored` |
 | Live uploads | 3 per user, 20 per session | Orchestrator, counted from reservations at announce |
@@ -425,7 +479,7 @@ Without limits, PHOTON becomes free file hosting. These are proposed defaults to
 | Join attempts | 5 per minute per user and per IP | Orchestrator |
 | Hash-mismatch strikes | 3, then uploads blocked for that session | Orchestrator, on `rejected` |
 
-**Abuse handling.** Members can report a photo and the host can kick a member. Short retention limits how long anything stays on the server. Illegal-content reporting and takedown rules need a legal review before any public launch.
+**Abuse handling.** Members can report a photo and the host can kick a member. Short retention limits how long anything stays on the server. The servers can't see photo content, so a report records only the hash and the reason; a reporter's app would have to attach the decrypted photo, which this version doesn't do. Illegal-content reporting and takedown rules need a legal review before any public launch, and that review must account for end-to-end encryption.
 
 **Observability**
 
@@ -464,6 +518,8 @@ Thirteen changes, the first being the one you asked for: a hash is trusted only 
 
 Added in the first review: fencing of every upload report by `upload_id`; session status checked in every transition; gap-free event catch-up with snapshot resync; expiry enforced on the image server with its own sweeper and retried deletions; Redis topology (standalone for v1, `{sid}` hash tags); atomic quota reservation; idempotent `complete`; recall semantics; thumbnail failure recovery; an error contract; OAuth state and redirect validation; refresh-token grace window; layered echo prevention; and a table of server guarantees against best-effort client behaviour. The last section maps every review finding to where it is handled.
 
+Added later: end-to-end encryption ([e2ee.md](e2ee.md)). Photos are encrypted on the phone, keys are relayed as sealed boxes, and the key rotates on every leave and kick. The image server lost its decoder, thumbnails and previews, and dedupe moved from the file hash to the photo tag.
+
 ## Build order and open decisions
 
 Build the server path first and test it with a script client; the Android app then plugs into a path that already works. Write the concurrency tests for fencing and quota before the client exists.
@@ -475,13 +531,14 @@ Build the server path first and test it with a script client; the Android app th
 5. Retention: the orchestrator sweeper, the image server sweeper, and deletion monitoring.
 6. Android client: observer, WorkManager upload, reconcile scan, echo layers, thumbnail-first receiving, recall.
 7. Rate limits and privacy controls, then HTTP/3, push as a hint, and iOS.
+8. End-to-end encryption: the key relay and rotation, the encrypted file, prefix downloads, dedupe by tag; then the reference client and Android. iOS still needs it.
 
 **Decisions to confirm (the design uses these defaults)**
 
 - [ ] Platform: Android first, with iOS later
 - [ ] Retention: 30 minutes of availability from stored\_at, physical deletion within 5 minutes after; ending a session deletes everything
 - [ ] Strip GPS from originals by default (proposed: yes)
-- [ ] Size limits: 25 MB and 100 megapixels per photo, 1 GB per session; JPEG, PNG, WebP and HEIC only
+- [ ] Size limits: 25 MB and 100 megapixels per photo, 1 GB per session; JPEG, PNG, WebP and HEIC only (the type list and pixel limit are now enforced by the apps)
 - [ ] Session capacity: 10 members, 3 live uploads per user, 20 per session
 
 ## Review findings and where each is handled
@@ -499,7 +556,7 @@ Findings 1 to 32 came from the design review; 33 to 39 were found while fixing t
 | 7 | Concurrent uploads exceed the quota | Bytes reserved atomically at announce | Data model |
 | 8 | Recall cannot reach offline devices | Server stops serving at once; clients delete caches on reconnect via the snapshot; limits stated | Client, Guarantees and limits |
 | 9 | Stream trimmed before a client returns | `RESYNC_REQUIRED` and a snapshot with a cursor | Reliability, Protocols and APIs |
-| 10 | Thumbnail generation fails after storage | Retry, resumable `VERIFIED` state, never announced without a thumbnail | Image pipeline and retention |
+| 10 | Thumbnail generation fails after storage | No longer possible: the uploader's app makes the thumbnail and encrypts it into the file, and the header check refuses a file without one | Image pipeline and retention, End-to-end encryption |
 | 11 | Cleanup of stale uploads hits newer ones | All paths and leases keyed by `upload_id` | Image pipeline and retention, Data model |
 | 12 | Resource exhaustion from temporary files | Live-upload limits, disk budget, streaming assembly, `503 BUSY` | Image pipeline and retention, Abuse |
 | 13 | Expired photo downloadable through stale state | Checks on every request, plus the image server's own metadata and `no-store` | Security |
@@ -511,7 +568,7 @@ Findings 1 to 32 came from the design review; 33 to 39 were found while fixing t
 | 19 | Re-encoding changes the hash | Five layers; asset id, folder, owner package come before hash | Client |
 | 20 | Recall cannot delete saved originals | Stated in the recall dialog and the guarantees table | Client, Guarantees and limits |
 | 21 | OAuth redirect and state validation | Exact redirect URIs; single-use `state` and PKCE per attempt | Security |
-| 22 | Image validation underspecified | Format allow-list, isolated decode, size and pixel limits | Image pipeline and retention |
+| 22 | Image validation underspecified | The servers can't see images: the image server checks the encrypted file's header; the apps enforce the type list and pixel limit, and receivers decode defensively | Image pipeline and retention, End-to-end encryption |
 | 23 | Upload token invalidation | Lease and session checks on every chunk and `complete` | Security |
 | 24 | No error contract | Status and code table, `Error` message, retry rules | Protocols and APIs |
 | 25 | Quota accounting | Reserve, convert and release exactly once per transition | Data model |

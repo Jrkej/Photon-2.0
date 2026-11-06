@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 
 from fastapi import APIRouter, Depends, Request, Response
 
-from photon.common import clock, ids, ratelimit
+from photon.common import clock, e2ee, ids, ratelimit
 from photon.common.errors import ApiError
 from photon.common.httpapp import client_ip
 from photon.common.pb import photon_pb2 as pb
@@ -19,6 +19,13 @@ def check_sid(sid: str) -> str:
     if not ids.is_valid_sid(sid):
         raise ApiError("INVALID_REQUEST", "Invalid session id")
     return sid
+
+
+def check_member_key(raw: bytes) -> str:
+    """The phone's X25519 public key (e2ee.md 3): required, so members can seal the session key for it."""
+    if len(raw) != e2ee.KEY_LEN:
+        raise ApiError("INVALID_REQUEST", "member_key must be a 32-byte X25519 public key")
+    return raw.hex()
 
 
 async def new_invites(svc: Svc, sid: str) -> tuple[str, str]:
@@ -64,6 +71,7 @@ def router(svc: Svc, user: Callable[[Request], Awaitable[str]]) -> APIRouter:
     @r.post("/v1/sessions")
     async def create(request: Request, uid: str = Depends(user)) -> Response:
         body = await parse_body(request, pb.CreateSessionRequest)
+        member_key = check_member_key(body.member_key)
         max_members = body.max_members or s.max_members
         if not 2 <= max_members <= s.max_members:
             raise ApiError("INVALID_REQUEST", f"max_members must be between 2 and {s.max_members}")
@@ -75,7 +83,7 @@ def router(svc: Svc, user: Callable[[Request], Awaitable[str]]) -> APIRouter:
             code, token = await new_invites(svc, sid)
             (exp,) = await svc.fn.call(
                 "create_session", K.session_keys(sid), sid, clock.now_ms(), svc.ret, uid,
-                s.session_idle_ms, max_members, code, token,
+                s.session_idle_ms, max_members, code, token, member_key,
             )
         except BaseException:
             await drop_invites(svc, code, token)
@@ -90,6 +98,7 @@ def router(svc: Svc, user: Callable[[Request], Awaitable[str]]) -> APIRouter:
         which = body.WhichOneof("by")
         if which is None:
             raise ApiError("INVALID_REQUEST", "A code or an invite token is required")
+        member_key = check_member_key(body.member_key)
         await ratelimit.hit(svc.r, K.rl("join:u", uid), s.join_per_minute, 60)
         await ratelimit.hit(svc.r, K.rl("join:ip", client_ip(request, s)), s.join_per_minute, 60)
         if which == "code":
@@ -101,12 +110,18 @@ def router(svc: Svc, user: Callable[[Request], Awaitable[str]]) -> APIRouter:
             raise ApiError("SESSION_NOT_FOUND", "This code or invite is not valid")
         claimed = await svc.claim_pointer(uid, sid)
         try:
-            await svc.fn.call("join", K.session_keys(sid), sid, clock.now_ms(), svc.ret, uid, s.session_idle_ms)
+            (joined,) = await svc.fn.call("join", K.session_keys(sid), sid, clock.now_ms(), svc.ret, uid,
+                                          s.session_idle_ms, member_key)
         except BaseException:
             if claimed:
                 await svc.release_pointer(uid, sid)  # the compensation for the cross-slot pointer
             raise
-        return proto_response(await session_info(svc, sid, uid))
+        info = await session_info(svc, sid, uid)
+        if joined != "ALREADY_MEMBER" and svc.pusher:
+            # Wake members without a live socket: one of them must seal the session key for the newcomer.
+            others = [m for m in info.member_ids if m != uid]
+            svc.spawn(svc.pusher.notify(sid, "joined", others))
+        return proto_response(info)
 
     @r.get("/v1/sessions/current")
     async def current(uid: str = Depends(user)) -> Response:

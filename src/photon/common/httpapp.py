@@ -65,6 +65,16 @@ def add_readyz(app: FastAPI, check: Callable[[], Awaitable[None]]) -> None:
     app.add_route("/readyz", readyz)
 
 
+PROXY_HEADERS = ("x-forwarded-for", "forwarded", "x-real-ip", "cf-connecting-ip", "cf-ray")
+
+
+def is_local_request(request: Request) -> bool:
+    """Made on this machine directly: a loopback peer, and none of the headers a proxy or tunnel adds (Cloudflare
+    sets X-Forwarded-For and CF-Connecting-IP on every request it forwards, and a visitor can't remove them)."""
+    peer = request.client.host if request.client else ""
+    return peer in ("127.0.0.1", "::1", "localhost") and not any(h in request.headers for h in PROXY_HEADERS)
+
+
 def client_ip(request: Request, settings: Settings) -> str:
     """X-Forwarded-For is trusted only when the direct peer is a configured proxy."""
     peer = request.client.host if request.client else "unknown"

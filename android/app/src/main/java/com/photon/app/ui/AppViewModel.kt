@@ -19,6 +19,7 @@ import com.photon.app.data.db.ReceivedPhoto
 import com.photon.app.data.db.SessionState
 import com.photon.app.events.ConnectionState
 import com.photon.app.graph
+import com.photon.app.keys.KeyStatus
 import com.photon.app.net.ApiException
 import com.photon.app.net.ErrorCodes
 import com.photon.app.session.EndReason
@@ -29,6 +30,7 @@ import com.photon.app.session.SessionRules
 import com.photon.proto.AuthConfig
 import com.photon.proto.SessionInfo
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
@@ -39,6 +41,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
@@ -111,6 +114,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     val connection: StateFlow<ConnectionState> = graph.connection.state
+
+    /** The session's keys on this phone; a newcomer holds none until a member's app shares them. */
+    val keyStatus: StateFlow<KeyStatus?> = combine(session, graph.keys.status) { s, status ->
+        s?.let { if (status?.sessionId == it.sessionId) status else graph.keys.localStatus(it.sessionId) }
+    }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     data class Settings(val stripGps: Boolean = true, val originalsWifiOrCharging: Boolean = false)
 

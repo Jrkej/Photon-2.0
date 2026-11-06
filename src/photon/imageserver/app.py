@@ -1,5 +1,6 @@
-"""Image server: owns the bytes. Verifies each upload's SHA-256 before it exists for anyone else, reports to the
-orchestrator, serves downloads to members, and deletes files at expiry on its own."""
+"""Image server: owns the bytes, which are end-to-end encrypted (e2ee.md). Verifies each upload's SHA-256 and file
+header before it exists for anyone else, reports to the orchestrator, serves downloads to members, and deletes files
+at expiry on its own. It never sees a photo."""
 
 from __future__ import annotations
 
@@ -16,7 +17,6 @@ from photon.common.config import Settings
 from photon.common.httpapp import add_readyz, create_base_app, service_dependency, user_dependency
 from photon.common.redisutil import make_client
 from photon.imageserver.access import Access
-from photon.imageserver.decode import Decoder
 from photon.imageserver.outbox import Outbox
 from photon.imageserver.pipeline import Pipeline
 from photon.imageserver.routes import router
@@ -52,9 +52,8 @@ def create_app(settings: Settings | None = None, keys: ImageServerKeys | None = 
     store = Store(settings.storage_root)
     redis = make_client(settings.redis_url, settings.redis_pool)
     access = Access(redis, settings)
-    decoder = Decoder(settings)
     outbox = Outbox(settings, store, jwtutil.ServiceTokens("imageserver", keys.service, settings.service_token_ttl_s))
-    pipeline = Pipeline(settings, store, access, decoder, outbox)
+    pipeline = Pipeline(settings, store, access, outbox)
     sweeper = Sweeper(store, access, pipeline)
 
     async def sweep_loop() -> None:
@@ -85,7 +84,7 @@ def create_app(settings: Settings | None = None, keys: ImageServerKeys | None = 
     app = create_base_app("photon-imageserver", settings, lifespan)
     app.state.pipeline, app.state.store, app.state.outbox, app.state.sweeper = pipeline, store, outbox, sweeper
     app.include_router(router(
-        store, access, pipeline, decoder, keys.upload, user_dependency(keys.auth),
+        store, access, pipeline, keys.upload, user_dependency(keys.auth),
         service_dependency(keys.orchestrator, "imageserver", "orchestrator"),
     ))
 

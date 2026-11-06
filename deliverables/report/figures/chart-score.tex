@@ -1,0 +1,9 @@
+% Feature score of Table "Comparison with existing systems" (tick = 1, partial = 0.5)
+\begin{tikzpicture}
+\begin{axis}[width=13cm, height=5.6cm, ybar, bar width=18pt, ymin=0, ymax=10.5,
+  symbolic x coords={PHOTON,Google Photos,iCloud SPL,AirDrop,Quick Share,WhatsApp}, xtick=data,
+  ylabel={score (out of 9)}, nodes near coords, nodes near coords style={font=\scriptsize},
+  axis lines*=left, ymajorgrids, grid style={gray!25}, tick label style={font=\scriptsize}, label style={font=\small}, enlarge x limits=0.1]
+\addplot[fill=pblue, draw=navy] coordinates {(PHOTON,9) (Google Photos,5) (iCloud SPL,5) (AirDrop,2) (Quick Share,2) (WhatsApp,4.5)};
+\end{axis}
+\end{tikzpicture}

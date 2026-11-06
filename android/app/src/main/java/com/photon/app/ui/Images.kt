@@ -44,11 +44,33 @@ fun QrImage(content: String, modifier: Modifier = Modifier) {
     bitmap?.let { Image(it, contentDescription = content, modifier = modifier) }
 }
 
-/** A cached thumbnail or preview file. */
+/**
+ * A cached thumbnail or preview file. These were decrypted from another member's upload, which the server
+ * can no longer screen (e2ee.md 8), so they are decoded defensively: bounds first, then downsampled to at
+ * most [MAX_DECODE_PX], and anything that won't decode stays a placeholder.
+ */
 @Composable
 fun FileImage(path: String?, modifier: Modifier = Modifier) {
-    val bitmap = rememberLoaded(path) { path?.let { BitmapFactory.decodeFile(it)?.asImageBitmap() } }
+    val bitmap = rememberLoaded(path) { path?.let { decodeBounded(it)?.asImageBitmap() } }
     Placeholder(bitmap, modifier)
+}
+
+private const val MAX_DECODE_PX = 2048
+
+private fun decodeBounded(path: String): Bitmap? = try {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeFile(path, bounds)
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+        null
+    } else {
+        var sample = 1
+        while (maxOf(bounds.outWidth, bounds.outHeight) / sample > MAX_DECODE_PX) sample *= 2
+        BitmapFactory.decodeFile(path, BitmapFactory.Options().apply { inSampleSize = sample })
+    }
+} catch (e: Exception) {
+    null
+} catch (e: OutOfMemoryError) {
+    null
 }
 
 /** A gallery photo (one of ours), through the system thumbnail. */

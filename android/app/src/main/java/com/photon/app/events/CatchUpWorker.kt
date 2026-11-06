@@ -19,7 +19,8 @@ object PushSignals {
 /**
  * 8.5: runs on every push hint and on app start. Push is only a hint (it may be dropped,
  * delayed or merged), so this always pulls `/events?since=` (or the snapshot), feeds the
- * receive pipeline, and runs the reconcile scan.
+ * receive pipeline, runs key maintenance (e2ee.md 5.3: a `kind=joined` push means a newcomer
+ * waits for the session key) and the reconcile scan.
  */
 class CatchUpWorker(context: Context, params: WorkerParameters) : PhotonWorker(context, params) {
     override suspend fun doWork(): Result {
@@ -33,6 +34,7 @@ class CatchUpWorker(context: Context, params: WorkerParameters) : PhotonWorker(c
                 graph.eventSync.catchUp()
                 passes++
             } while (PushSignals.current() != seen && passes < MAX_PASSES)
+            graph.keySync.runNow()
             graph.scheduler.enqueueReconcile()
             graph.scheduler.enqueueUploads()
             Result.success()

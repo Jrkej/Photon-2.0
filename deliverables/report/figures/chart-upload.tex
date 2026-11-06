@@ -1,0 +1,12 @@
+% Upload end to end by photo size: where the time goes
+\begin{tikzpicture}
+\begin{axis}[width=14cm, height=5.6cm, xbar stacked, bar width=13pt, xmin=0, xmax=430,
+  symbolic y coords={{8.7 MB, 12 MP grain},{3.1 MB, 12 MP},{1.5 MB, 3000x2250},{0.4 MB, 1600x1200}}, ytick=data,
+  xlabel={milliseconds (median of 3, loopback)}, area legend, legend style={font=\scriptsize, at={(0.5,1.03)}, anchor=south, draw=gray!40, legend columns=3}, legend cell align=left,
+  axis lines*=left, xmajorgrids, grid style={gray!25}, tick label style={font=\scriptsize}, label style={font=\small}, enlarge y limits=0.2]
+\addplot[fill=yellowline, draw=yellowline!70!black] coordinates {(2.58,{8.7 MB, 12 MP grain}) (2.50,{3.1 MB, 12 MP}) (2.95,{1.5 MB, 3000x2250}) (2.56,{0.4 MB, 1600x1200})};
+\addplot[fill=pblue, draw=navy] coordinates {(38.47,{8.7 MB, 12 MP grain}) (21.05,{3.1 MB, 12 MP}) (11.35,{1.5 MB, 3000x2250}) (7.67,{0.4 MB, 1600x1200})};
+\addplot[fill=greenline, draw=greentab] coordinates {(351,{8.7 MB, 12 MP grain}) (298,{3.1 MB, 12 MP}) (216,{1.5 MB, 3000x2250}) (169,{0.4 MB, 1600x1200})};
+\legend{announce, chunks (3 parallel PUTs), complete (verify + decode + thumbnail + report)}
+\end{axis}
+\end{tikzpicture}

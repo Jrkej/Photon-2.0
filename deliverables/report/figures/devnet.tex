@@ -1,0 +1,12 @@
+% Two ways a test phone reaches the development backend
+\begin{tikzpicture}[x=1cm,y=1cm]
+\node[cli, minimum width=26mm] (p1) at (0,0) {Phone (USB)\\\scriptsize app: 127.0.0.1:8080};
+\node[blk, minimum width=34mm] (adb) at (4.8,0) {adb reverse\\\scriptsize tcp:8080 $\to$ tcp:8080};
+\node[blk, minimum width=34mm] (lap) at (10.2,-1.1) {Laptop: photon-dev\\\scriptsize API :8080, images :8081};
+\draw[arr] (p1) -- node[lbl]{loopback} (adb);
+\draw[arr] (adb.east) -- node[lbl, sloped]{USB tunnel} (lap.north west);
+\node[cli, minimum width=26mm] (p2) at (0,-2.2) {Phone (Wi-Fi)\\\scriptsize app: 10.81.x.y:8080};
+\node[ext, minimum width=34mm] (ap) at (4.8,-2.2) {Wi-Fi access point\\\scriptsize same subnet, no NAT};
+\draw[arr] (p2) -- node[lbl]{802.11} (ap);
+\draw[arr] (ap.east) -- node[lbl, sloped]{--host 0.0.0.0} (lap.south west);
+\end{tikzpicture}

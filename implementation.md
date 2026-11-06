@@ -10,18 +10,21 @@ The phases follow the design's build order. The server path is built first and t
 
 Oct 13, 2026. Phases 0–6, the server side of Phases 8 and 9, and the Python tooling are built. The 153 tests pass, ruff is clean, and `mypy --strict` passes on `src/`. The [README](README.md) explains how to run everything.
 
+Nov 6, 2026. [Phase 10](#phase-10--end-to-end-encryption) adds end-to-end encryption to the server, the Python reference client and the Android app. The image server's decoder, thumbnails and previews are gone, and the steps of Phases 3–5 that they changed are marked below. iOS isn't updated yet. The 189 tests pass (plus 8 benchmarks, run on demand), ruff is clean, and `mypy --strict` passes on `src/`.
+
 | Phase | State |
 | --- | --- |
 | 0 Foundation | Built: pyproject, proto and generated code, common library, Redis Functions library, key generator, CI workflow. Redis is built from source by `scripts/dev-deps.sh`, and Postgres comes from the `pgserver` wheel, so no Docker is needed. |
 | 1 Auth | Built and tested (17 tests). Google is tested against a mocked provider; it needs a real client id to run. |
 | 2 Sessions | Built and tested (11 tests). |
-| 3 Image server | Built and tested (17 tests, plus 18 decoder unit tests). |
+| 3 Image server | Built and tested (17 tests, plus 18 decoder unit tests). Phase 10 removed the decoder and its tests: the server now checks only the encrypted file's header. |
 | 4 Announce and fencing | Built and tested (13 tests, plus the model-based test). |
 | 5 Events | Built and tested (13 tests, including 1,200 events across random reconnects). |
 | 6 Retention | Built and tested (9 tests). |
 | 7 Android | Built ([android/](android/)): the debug APK builds offline, 135 unit tests pass, and lint has 0 errors. On a real phone (a Motorola edge 70 fusion with Android 16), photos taken with PHOTON in the background upload within about 2 s, also after the app's process was killed (the service is restarted and the new-photo trigger fires), and sync resumes after an app update. Instrumented tests compile but have not run, and the app has not run on a device or emulator. See [android/README.md](android/README.md). |
 | 8 Limits, privacy, HTTP/3, push, iOS | Server side built and tested: rate limits, reports, push hints (FCM for Android, APNs for iOS, routed by each device's platform), devices. HTTP/3 is configured in the Caddyfile but not exercised here. iOS ([ios/](ios/)): the PhotonKit core builds and its 90 tests pass on Linux with Swift 6.3. The SwiftUI app target has not been compiled (no Xcode here). See [ios/README.md](ios/README.md). |
 | 9 Operations | Metrics, alerts, Dockerfile, compose, Caddy, Redis config and ACLs written. The ACL file was verified on Redis 7.2 (`test_acl.py`). The load test was run on one machine. Docker files were not run here (no Docker access on the build machine). |
+| 10 End-to-end encryption | Server and Python reference client built and tested: the reference implementation against fixed test vectors (`tests/unit/test_e2ee.py`) and the key relay, rotation and encrypted uploads through the real stack (`tests/integration/test_keys.py`). Android: see [android/README.md](android/README.md). iOS: not started, so the iOS app can't use a server with this phase. |
 
 ## Contents
 
@@ -38,11 +41,12 @@ Oct 13, 2026. Phases 0–6, the server side of Phases 8 and 9, and the Python to
 11. [Phase 7 — Android client (Kotlin)](#phase-7--android-client-kotlin)
 12. [Phase 8 — Limits, privacy, HTTP/3, push and iOS](#phase-8--limits-privacy-http3-push-and-ios)
 13. [Phase 9 — Observability, deployment and release](#phase-9--observability-deployment-and-release)
-14. [Review findings to steps and tests](#review-findings-to-steps-and-tests)
-15. [Additions to the design](#additions-to-the-design)
-16. [Decided while building](#decided-while-building)
+14. [Phase 10 — End-to-end encryption](#phase-10--end-to-end-encryption)
+15. [Review findings to steps and tests](#review-findings-to-steps-and-tests)
+16. [Additions to the design](#additions-to-the-design)
+17. [Decided while building](#decided-while-building)
 
-How the phases map to the design's build order: design step 1 is Phases 1 and 2, and steps 2 to 7 are Phases 3 to 8. Phase 0 (foundation) and Phase 9 (operations) are added.
+How the phases map to the design's build order: design step 1 is Phases 1 and 2, steps 2 to 7 are Phases 3 to 8, and step 8 (end-to-end encryption) is Phase 10. Phase 0 (foundation) and Phase 9 (operations) are added.
 
 ## Stack
 
@@ -56,7 +60,8 @@ How the phases map to the design's build order: design step 1 is Phases 1 and 2,
 | Protobuf | `protobuf` 5, code generated with `grpcio-tools`, breaking changes checked with `buf breaking` |
 | JWT | PyJWT with `cryptography`, Ed25519 (`EdDSA`) |
 | Outbound HTTP | httpx (OAuth providers, service-to-service calls) |
-| Images | Pillow and pillow-heif, run in a sandboxed subprocess |
+| Images | Pillow and pillow-heif, in the reference client only (type checks, thumbnails and previews before encryption). The server has no image code since Phase 10 |
+| End-to-end encryption | `cryptography`: X25519, HKDF-SHA256, HMAC-SHA256, AES-256-GCM (Phase 10) |
 | Checksums | `hashlib` (SHA-256), `google-crc32c` |
 | Push | firebase-admin (FCM), aioapns (APNs, Phase 8) |
 | Config | pydantic-settings, from environment variables and mounted secret files |
@@ -80,6 +85,7 @@ photon/
 │   │   ├── ratelimit.py                # rl:{scope}:{id} windows
 │   │   ├── ids.py                      # session ids, upload ids, join codes, invite tokens
 │   │   ├── clock.py                    # now_ms(), replaceable in tests
+│   │   ├── e2ee.py                     # end-to-end encryption, the reference implementation (Phase 10)
 │   │   ├── logging.py                  # structlog setup, request id middleware
 │   │   └── metrics.py                  # Prometheus registry, /metrics
 │   ├── auth/
@@ -95,7 +101,7 @@ photon/
 │   │   ├── keys.py                     # key names
 │   │   ├── events.py                   # stream entry -> PhotoEvent
 │   │   ├── scripts.py                  # typed Python wrappers around the Lua scripts
-│   │   ├── routes/{sessions,photos,events,internal,devices}.py
+│   │   ├── routes/{sessions,photos,events,keys,internal,devices}.py
 │   │   ├── ws.py                       # /v1/ws
 │   │   ├── upload_tokens.py            # mints upload JWTs
 │   │   ├── imageserver_client.py       # DELETE /internal/v1/photos/...
@@ -107,16 +113,16 @@ photon/
 │       ├── store.py                    # paths, atomic writes, fsync helpers
 │       ├── upload_state.py             # state.json and its state machine
 │       ├── access.py                   # Redis reads: session, membership, lease, photo
-│       ├── pipeline.py                 # complete(): assemble, hash, validate, stage, report
-│       ├── decode_worker.py            # subprocess entry point: validate, thumb, preview
+│       ├── pipeline.py                 # complete(): assemble, hash, check the header, stage, report
 │       ├── outbox.py                   # pending reports, retries, promotion
 │       └── sweeper.py
 ├── migrations/                         # Alembic
 ├── tools/
 │   ├── photon_cli.py                   # script client: login, create, join, upload, listen, download
 │   ├── gen_keys.py
+│   ├── e2ee_vectors.py                 # writes tests/vectors/e2ee_v1.json (Phase 10)
 │   └── loadtest.py
-├── tests/{unit,integration,e2e}/
+├── tests/{unit,integration,e2e,vectors}/
 └── deploy/{docker-compose.yml,Caddyfile,redis.conf,users.acl,prometheus.yml,alerts.yml}
 ```
 
@@ -125,10 +131,10 @@ photon/
 - **Time.** Every timestamp is Unix milliseconds. Python passes `now_ms` into each Lua script as an argument, so tests can drive time. NTP (chrony) keeps hosts within tens of milliseconds, which the design requires because the image server and the orchestrator compare `expires_at`.
 - **Errors.** Handlers raise `ApiError(code, message=None, retry_after_s=None, missing_chunks=None)`. `errors.py` holds the design's error contract as one table, `code → (status, retryable)`, so a code always maps to the same status. A FastAPI exception handler writes the `Error` protobuf and sets `Retry-After` whenever `retry_after_s` is set. Unknown exceptions become `503 BUSY` with `retryable=true` and are logged with the request id.
 - **Protobuf over HTTP.** `parse_body(request, pb.AnnounceRequest)` checks `Content-Type: application/x-protobuf`, caps the body size, and parses. A wrong type or a parse error is `400 INVALID_REQUEST`. `ProtoResponse(msg, status=200)` serialises with that media type. Hashes travel as 32 raw bytes and are lowercase hex in Redis and on disk.
-- **Lua scripts.** All state transitions live in one Redis Functions library, `orchestrator/lua/photon.lua` (`#!lua name=photon`). It registers one function per transition (`create_session`, `join`, `leave`, `kick`, `end_session`, `announce`, `report_stored`, `report_rejected`, `recall`, `expire_photo`, `recount`, `touch_session`, `touch_lease`, plus the single-key `ptr_cas`, `ptr_del`, `rotate_refresh` and `rate_limit`) and read-only ones with the `no-writes` flag (`version`, `snapshot`, `events_since`, `upload_check`, `download_check`). Shared local helpers (`release_reservation`, `append_event`, `remove_member`, `do_end`) keep each rule in one place. The orchestrator loads the library; Auth and the image server only call `FCALL` and `FCALL_RO`. Functions are Lua scripts, as the design asks, and they persist in the AOF and replicate. A function's `KEYS` are only `{sid}`-tagged keys. It returns `{"OK", ...}` or `{"ERR", "<CODE>"}`, and `scripts.py` turns the error code into an `ApiError`. Functions never touch cross-slot keys (`user:*`, `code:*`, `invite:*`, `expiry:*`, `sessions:due`, `rl:*`, `refresh:*`). Python handles those before or after the call, with compensation where the design asks for it. A function that builds a key name from data, such as the lease key from an `upload_id`, builds it with the same `{sid}` tag, so the key stays in the session's slot.
+- **Lua scripts.** All state transitions live in one Redis Functions library, `orchestrator/lua/photon.lua` (`#!lua name=photon`). It registers one function per transition (`create_session`, `join`, `leave`, `kick`, `end_session`, `announce`, `report_stored`, `report_rejected`, `recall`, `expire_photo`, `recount`, `touch_session`, `touch_lease`, plus the single-key `ptr_cas`, `ptr_del`, `rotate_refresh` and `rate_limit`, and `put_keys` since Phase 10) and read-only ones with the `no-writes` flag (`version`, `snapshot`, `events_since`, `upload_check`, `download_check`, and `key_state`). Shared local helpers (`release_reservation`, `append_event`, `remove_member`, `drop_boxes`, `do_end`) keep each rule in one place. The orchestrator loads the library; Auth and the image server only call `FCALL` and `FCALL_RO`. Functions are Lua scripts, as the design asks, and they persist in the AOF and replicate. A function's `KEYS` are only `{sid}`-tagged keys. It returns `{"OK", ...}` or `{"ERR", "<CODE>"}`, and `scripts.py` turns the error code into an `ApiError`. Functions never touch cross-slot keys (`user:*`, `code:*`, `invite:*`, `expiry:*`, `sessions:due`, `rl:*`, `refresh:*`). Python handles those before or after the call, with compensation where the design asks for it. A function that builds a key name from data, such as the lease key from an `upload_id`, builds it with the same `{sid}` tag, so the key stays in the session's slot.
 - **Identifiers.** `sid`: 16 random bytes as url-safe base64 without padding (22 characters; it never contains `{` or `}`). `upload_id`: UUID4 hex. Join code: 8 Crockford base32 characters. Invite token: 16 random bytes, url-safe base64. `event_id`: the Redis stream id.
 - **Request ids.** Middleware accepts `X-Request-Id` or generates one, binds it to the structlog context, and forwards it on every service-to-service call.
-- **Configuration.** Every limit in the design's tables is a setting with the proposed default (retention 30 min, 25 MB, 100 MP, 10 members, 1 GB, 3 and 20 live uploads, 20 announces per minute, 5 joins per minute, 3 strikes). Tests override them.
+- **Configuration.** Every limit in the design's tables is a setting with the proposed default (retention 30 min, 25 MB, 10 members, 1 GB, 3 and 20 live uploads, 20 announces per minute, 5 joins per minute, 3 strikes). Tests override them. The 100 MP limit and the image type list moved to the clients in Phase 10, because the server can't see inside encrypted files.
 
 ## Phase 0 — Project foundation
 
@@ -289,16 +295,18 @@ Key rotation: publish the new key, wait at least 10 minutes (the verifiers' JWKS
 
 The orchestrator is a stateless FastAPI app (`photon.orchestrator.app`). This phase builds create, join, leave, kick and end, and the shared Lua helpers every later phase uses. It ends with the design's first build step done: sessions in Redis, with the `ACTIVE` check inside every script.
 
-**2.1 Key helpers.** `orchestrator/keys.py` builds every key name. In the design's notation, `{sid}` in a key is the literal hash tag, so `session:{sid}:photos` for the session `aB3x` is `session:{aB3x}:photos`; other placeholders are plain text. Every session function gets the same six keys in this order, so the Lua code can address them by position:
+**2.1 Key helpers.** `orchestrator/keys.py` builds every key name. In the design's notation, `{sid}` in a key is the literal hash tag, so `session:{sid}:photos` for the session `aB3x` is `session:{aB3x}:photos`; other placeholders are plain text. Every session function gets the same eight keys in this order (six until Phase 10 added the last two), so the Lua code can address them by position:
 
 | `KEYS[i]` | Key | Notes |
 | --- | --- | --- |
-| 1 | `session:{sid}` | hash: `host`, `status`, `created_at`, `expires_at`, `max_members`, `stored_bytes`, `reserved_bytes`, `join_code`, `invite_token`, `last_event_id`, `trimmed_before`, `ended_at` |
-| 2 | `session:{sid}:members` | hash: uid → JSON `{role, joined_at, strikes}` |
-| 3 | `session:{sid}:photos` | hash: sha256 hex → JSON `{status, uploader, upload_id, size, mime, taken_at, reserved_at, stored_at, expires_at}` |
+| 1 | `session:{sid}` | hash: `host`, `status`, `created_at`, `expires_at`, `max_members`, `stored_bytes`, `reserved_bytes`, `join_code`, `invite_token`, `last_event_id`, `trimmed_before`, `ended_at`, and since Phase 10 `epoch` and `rotate` |
+| 2 | `session:{sid}:members` | hash: uid → JSON `{role, joined_at, strikes, pk, ke}` (`pk`: the member's public key, hex; `ke`: the newest key epoch it holds) |
+| 3 | `session:{sid}:photos` | hash: sha256 hex → JSON `{status, uploader, upload_id, size, mime, taken_at, tag, ke, reserved_at, stored_at, expires_at}` |
 | 4 | `session:{sid}:live` | hash: upload_id → JSON `{sha, uploader, size, reserved_at}`; one entry per live reservation (added by this plan) |
 | 5 | `session:{sid}:events` | stream |
 | 6 | `session:{sid}:kicked` | set of kicked uids, refused on rejoin (added by this plan) |
+| 7 | `session:{sid}:tags` | hash: photo tag hex → sha256 hex, for dedupe across files (Phase 10) |
+| 8 | `session:{sid}:keys` | hash: `<epoch>:<uid>` → JSON `{from, box}`, the sealed keys (Phase 10) |
 
 The lease key is built inside Lua as `'upload:{' .. sid .. '}:' .. upload_id`, in the session's slot. The `live` hash makes the live-upload limits (3 per user, 20 per session) and releasing a member's reservations O(live uploads) rather than a scan of every photo. JSON numbers stay below 10^14, which `cjson` encodes exactly (`%.14g`).
 
@@ -473,7 +481,7 @@ Then Python runs `release_pointer(uid, sid)`, and if the session ended, the end 
 
 ## Phase 3 — Image server: upload and complete
 
-The image server (`photon.imageserver.app`) owns the bytes. It never changes session state and never notifies members. It reads session state from Redis, refreshes upload leases, and reports to the orchestrator. Run it as one uvicorn process per host. CPU work goes to a thread pool (hashing, file I/O) or to sandboxed subprocesses (decoding). In this phase the reports go to a fake orchestrator; the real fenced endpoints arrive in Phase 4.
+The image server (`photon.imageserver.app`) owns the bytes. It never changes session state and never notifies members. It reads session state from Redis, refreshes upload leases, and reports to the orchestrator. Run it as one uvicorn process per host. CPU work goes to a thread pool (hashing, file I/O); until Phase 10 decoding also ran in sandboxed subprocesses. In this phase the reports go to a fake orchestrator; the real fenced endpoints arrive in Phase 4.
 
 **3.1 Disk layout and write helpers.** `imageserver/store.py`. Everything sits under one root on one filesystem, so every `rename` is atomic:
 
@@ -485,10 +493,9 @@ The image server (`photon.imageserver.app`) owns the bytes. It never changes ses
 │   ├── chunks/{n}            # received chunks; {n}.part while being written
 │   ├── assembled             # being hashed
 │   └── staged/               # verified upload, kept under its upload_id until the orchestrator accepts it
-│       ├── original
-│       ├── thumb.webp
+│       ├── file              # the encrypted photo file (Phase 10); was original and thumb.webp
 │       └── meta.json
-├── photos/{sid}/{sha256}/    # promoted: original, thumb.webp, preview.webp, meta.json
+├── photos/{sid}/{sha256}/    # promoted: file, meta.json (was original, thumb.webp, preview.webp)
 ├── outbox/{upload_id}.json   # pending stored/rejected reports
 └── trash/                    # renamed here, then removed in the background
 ```
@@ -497,7 +504,7 @@ The image server (`photon.imageserver.app`) owns the bytes. It never changes ses
 
 This plan moves promotion after the orchestrator's answer: the design renames into the final path before the report, then says the files of a fenced-out upload, and only those, are deleted. Keeping the verified upload under `tmp/{upload_id}/staged/` until the orchestrator answers `200` satisfies both: a `409` or `410` deletes exactly `tmp/{upload_id}/`, and the photo directory is only ever created for an accepted upload.
 
-**3.2 Upload token check.** `imageserver/auth.py`: verify the upload JWT against the orchestrator's upload JWKS with `aud=image-server`. Claims: `sid`, `sha256` (hex), `size`, `mime`, `taken_at_ms`, `uploader`, `upload_id`, `exp` (10 minutes). `mime` and `taken_at_ms` are added by this plan, because the image server needs them for type checking and for `PhotoStored`. The `upload_id` in the path must equal the claim, otherwise `404 UNKNOWN_UPLOAD`.
+**3.2 Upload token check.** `imageserver/auth.py`: verify the upload JWT against the orchestrator's upload JWKS with `aud=image-server`. Claims: `sid`, `sha256` (hex), `size`, `mime`, `taken_at_ms`, `uploader`, `upload_id`, `exp` (10 minutes), and since Phase 10 `key_epoch`, which the file's header must carry. `mime` and `taken_at_ms` are added by this plan, because the image server needs them for `PhotoStored` (and, before Phase 10, for type checking). The `upload_id` in the path must equal the claim, otherwise `404 UNKNOWN_UPLOAD`.
 
 **3.3 Access checks.** `imageserver/access.py`, using the library's functions:
 - `upload_check(sid, uid, upload_id)` (`FCALL_RO`): session status, membership, and whether the lease exists. If the lease is gone, it also says whether the photo entry now names another `upload_id`.
@@ -506,20 +513,19 @@ This plan moves promotion after the orchestrator's answer: the design renames in
 
 Mapping: status not `ACTIVE` → `410 SESSION_ENDED`. Not a member → `403 NOT_A_MEMBER`. Lease gone and the entry names another id → `409 UPLOAD_SUPERSEDED`. Lease gone otherwise → `410 UPLOAD_EXPIRED`.
 
-**3.4 Upload state machine.** `imageserver/upload_state.py`. The design's four states, plus four this plan needs to make `complete` idempotent end to end:
+**3.4 Upload state machine.** `imageserver/upload_state.py`. The design's four states, plus three this plan needs to make `complete` idempotent end to end. (A fourth, `VERIFIED`, held a staged original whose thumbnail was missing; Phase 10 removed it with server-side thumbnails.)
 
 | State | Meaning | A repeated `complete` answers |
 | --- | --- | --- |
 | `RECEIVING` | Chunks arriving | Runs the checks and starts verifying |
 | `VERIFYING` | Assembling and hashing | Never seen under the lock; found after a crash, it resets to `RECEIVING` (3.8 step 2) |
-| `VERIFIED` | Hash and format good, original staged, thumbnail missing | Resumes at the thumbnail, no re-hash |
 | `REPORTING` | Staged, report in the outbox | `202`, `Retry-After: 2` |
 | `STORED` | Orchestrator accepted, promoted | `200` with the same `CompleteResponse` |
-| `REJECTED` | Hash mismatch or invalid image | The same `422` |
+| `REJECTED` | Hash mismatch or invalid encrypted file | The same `422` |
 | `SUPERSEDED` | Orchestrator answered `409` | `409 UPLOAD_SUPERSEDED` |
 | `ENDED` | Orchestrator answered `410` | `410 SESSION_ENDED` |
 
-`state.json` holds `upload_id`, `sid`, `sha256`, `size`, `mime`, `taken_at_ms`, `uploader`, `state`, `created_at`, `thumb_attempts`, `lease_missing_since` and `result` (the `stored_at`/`expires_at` or the error code). Each upload has an `asyncio.Lock` (a dict of weak references) plus `fcntl.flock` on `tmp/{upload_id}/.lock`, so a second worker process can't interleave.
+`state.json` holds `upload_id`, `sid`, `sha256`, `size`, `mime`, `taken_at_ms`, `uploader`, `key_epoch`, `state`, `created_at`, `lease_missing_since` and `result` (the `stored_at`/`expires_at` or the error code). Each upload has an `asyncio.Lock` (a dict of weak references) plus `fcntl.flock` on `tmp/{upload_id}/.lock`, so a second worker process can't interleave.
 
 **3.5 `PUT /v1/uploads/{upload_id}/chunks/{n}`.** Headers: `Authorization: Bearer <upload token>`, `X-Chunk-CRC32C` (base64 of the big-endian CRC32C), `Content-Length`.
 1. Token (3.2). `n` must be below 4096, and `Content-Length` at most `MAX_CHUNK` (8 MiB), else `400 INVALID_REQUEST` or `413 TOO_LARGE`.
@@ -535,7 +541,7 @@ The client chooses one chunk size per upload and keeps it for that upload. The s
 
 **3.6 `GET /v1/uploads/{upload_id}`.** Token required. Returns `UploadStatus`: the state, the chunk indexes present, the bytes received, and `server_has_file` (true when `photos/{sid}/{sha256}/meta.json` exists and hasn't expired). If there is no state yet but the lease exists, the answer is `RECEIVING` with no chunks. If there is neither, `404 UNKNOWN_UPLOAD`.
 
-**3.7 Sandboxed decoding.** `imageserver/decode_worker.py` runs as `python -I -m photon.imageserver.decode_worker <mode> <in> <out_dir>`. It is launched with `asyncio.create_subprocess_exec`, `start_new_session=True`, an empty environment, and a `preexec_fn` that sets `RLIMIT_AS` (1.5 GB), `RLIMIT_CPU` (20 s), `RLIMIT_FSIZE` (64 MB) and `RLIMIT_NOFILE` (32). Wall-clock limit: `asyncio.wait_for(proc.wait(), 30)`, then `os.killpg(SIGKILL)`. At most `DECODE_CONCURRENCY` workers run at once (default: cores).
+**3.7 Sandboxed decoding (removed in Phase 10).** The server can't see images any more, so `decode.py`, `decode_worker.py` and the settings `max_pixels`, `allowed_mimes`, `decode_*`, `thumb_px`, `preview_px` and `thumb_attempts` are gone. The uploader's app now does the type checks and makes the thumbnail and preview (10.6), and receivers decode defensively. The original plan, kept for reference: `imageserver/decode_worker.py` runs as `python -I -m photon.imageserver.decode_worker <mode> <in> <out_dir>`. It is launched with `asyncio.create_subprocess_exec`, `start_new_session=True`, an empty environment, and a `preexec_fn` that sets `RLIMIT_AS` (1.5 GB), `RLIMIT_CPU` (20 s), `RLIMIT_FSIZE` (64 MB) and `RLIMIT_NOFILE` (32). Wall-clock limit: `asyncio.wait_for(proc.wait(), 30)`, then `os.killpg(SIGKILL)`. At most `DECODE_CONCURRENCY` workers run at once (default: cores).
 - `validate`: detect the type from magic bytes (JPEG `FF D8 FF`; PNG `89 50 4E 47`; WebP `RIFF....WEBP`; HEIC/HEIF an `ftyp` box with brand `heic`, `heix`, `mif1`, `msf1` or `hevc`). It must be on the allow-list and equal the declared `mime`. Open with Pillow (`pillow_heif.register_heif_opener()`). Check `width × height ≤ 100 000 000` before decoding, with Pillow's own bomb guard turned off in favour of this explicit check. Reject `n_frames > 1` (animated WebP, APNG, multi-image HEIC). Then `img.load()` decodes the whole image. Output: JSON with format, width and height.
 - `thumb`: `ImageOps.exif_transpose`, convert to sRGB (through `ImageCms` when an ICC profile is present), longest edge 320 px, save as WebP quality 70 without EXIF, XMP or ICC.
 - `preview`: the same, with longest edge 1600 px and quality 80.
@@ -549,14 +555,14 @@ How results are read: in `validate`, a limit hit is `INVALID_IMAGE`, as in the d
 2. A final or reporting state answers from the table in 3.4. A leftover `VERIFYING` (from a crash) deletes `assembled` and resets to `RECEIVING`. The chunks consumed before the crash are gone, so step 6 lists them as missing and the client resends them.
 3. Uncached checks: session `ACTIVE`, uploader a member, lease present (3.3 mapping).
 4. **Reuse after Redis loss:** if `photos/{sid}/{sha256}/meta.json` exists and hasn't expired, skip to step 13 with that meta's `stored_at` and `expires_at`, so retention is never extended. Nothing is re-hashed and no second copy is stored.
-5. `VERIFIED`: jump to step 11.
+5. *(Removed in Phase 10: there is no `VERIFIED` state.)*
 6. Chunks `0 … chunk_count-1` must all exist, with no index beyond them, and their sizes must add up to the token's `size`. Otherwise `400 INVALID_REQUEST` with `missing_chunks`.
 7. Write `VERIFYING`. In a worker thread, stream the chunks in order into `assembled`, updating SHA-256 in 1 MiB blocks, and delete each chunk once it's consumed (peak extra disk is about one photo). Then `fsync`.
 8. Digest ≠ the token's `sha256`: delete `tmp/{upload_id}/` except `state.json`, write `REJECTED` with `HASH_MISMATCH`, write the outbox record `rejected` (3.9), and answer `422 HASH_MISMATCH`.
-9. `validate` (3.7). Invalid: the same as step 8 with `INVALID_IMAGE`.
-10. Rename `assembled` to `staged/original`, `fsync` the directory, and write `VERIFIED`.
-11. Thumbnail: increment and persist `thumb_attempts`, then run `thumb`. Permanent failure, or a transient failure at the third attempt in total: reject as `INVALID_IMAGE` (step 8, and delete `staged/`). Transient failure with attempts left: answer `503 PROCESSING_FAILED` with `Retry-After: 5`; the next `complete` resumes at this step. A photo is never reported without a thumbnail.
-12. `staged/meta.json`: `sid`, `sha256`, `size`, `mime`, `uploader`, `upload_id`, `taken_at_ms`, `width`, `height`, `stored_at_ms = now` and `expires_at_ms = now + RETENTION_MS`. `fsync`.
+9. Header check (since Phase 10): parse the first 85 bytes with `e2ee.parse_header`. It must be version 1 with sane section lengths and a non-empty thumbnail and original, its sizes must add up to the token's `size`, and its epoch must equal the token's `key_epoch`. Otherwise: the same as step 8 with `INVALID_IMAGE`.
+10. Rename `assembled` to `staged/file` and `fsync` the directory.
+11. *(Removed in Phase 10: the uploader makes the thumbnail and encrypts it into the file, so a stored photo always has one.)*
+12. `staged/meta.json`: `sid`, `sha256`, `size`, `mime`, `uploader`, `upload_id`, `taken_at_ms`, `key_epoch`, `header_len`, `lengths` (the four section lengths, used to serve prefixes), `stored_at_ms = now` and `expires_at_ms = now + RETENTION_MS`. `fsync`.
 13. Write the outbox record `stored` (a `PhotoStored` with this `upload_id` and the meta's times), then write `REPORTING`. Send the report at once and wait up to 5 seconds:
     - `200` (`APPLIED` or `NOOP`): promote (3.9), write `STORED`, and answer `200 CompleteResponse`.
     - `409`: delete `tmp/{upload_id}/` except `state.json`, write `SUPERSEDED`, and answer `409 UPLOAD_SUPERSEDED`.
@@ -583,8 +589,7 @@ How results are read: in `validate`, a limit hit is `INVALID_IMAGE`, as in the d
 - A wrong hash ends in `422 HASH_MISMATCH`, a `rejected` report, and no file in `photos/`.
 - A crash between steps 12 and 13 (the test kills the process): on restart the outbox resends, and promotion happens exactly once.
 - A crash during step 7: the next `complete` lists the consumed chunks as missing; after they are resent, it succeeds.
-- A transient thumbnail failure (worker forced to exit 11) gives `503`. The next `complete` succeeds without hashing again (a counter on the hash function). A third failure gives `INVALID_IMAGE` and the files are deleted.
-- Hostile files: a decompression-bomb PNG, a 30 000 × 30 000 header, an animated WebP and an APNG, a truncated JPEG, a PNG declared as JPEG, a HEIC with two primary images, and a file that exceeds `RLIMIT_AS`. Each ends in `INVALID_IMAGE`, and the server process stays healthy. Trailing data after a valid JPEG is accepted (see [Decided while building](#decided-while-building)).
+- *(Before Phase 10.)* A transient thumbnail failure gave `503`, the next `complete` succeeded without hashing again, and a third failure gave `INVALID_IMAGE`. Hostile image files (decompression bombs, huge headers, animated files, truncated or mislabelled images) each ended in `INVALID_IMAGE`. Since Phase 10 these checks run in the uploader's app, and the server's tests are header tests (10.10): a plaintext file, a truncated encrypted file, or a header with another epoch ends in `INVALID_IMAGE`, and the same `422` repeats.
 - Disk budget reached gives `503 BUSY`. A session that isn't `ACTIVE` refuses chunks and `complete` with `410`. A chunk after `STORED` gives `409 UPLOAD_FINALIZED`.
 - `409` and `410` answers delete exactly `tmp/{upload_id}/` and nothing under `photos/`.
 
@@ -592,9 +597,9 @@ How results are read: in `validate`, a limit hit is `INVALID_IMAGE`, as in the d
 
 This phase connects the two services and builds the rule that runs through every upload call: a call names its `upload_id`, and the orchestrator applies it only if that id is still the live one for the hash. The concurrency tests in 4.9 are written here, before any client exists, as the design asks.
 
-**4.1 Upload tokens.** `orchestrator/upload_tokens.py` mints an Ed25519 JWT with the `orch-upload` key: `iss=photon-orchestrator`, `aud=image-server`, `sid`, `sha256` (hex), `size`, `mime`, `taken_at_ms`, `uploader`, `upload_id`, and `exp = now + 10 min`. The public key is served at `/internal/v1/jwks.json` for the image server.
+**4.1 Upload tokens.** `orchestrator/upload_tokens.py` mints an Ed25519 JWT with the `orch-upload` key: `iss=photon-orchestrator`, `aud=image-server`, `sid`, `sha256` (hex), `size`, `mime`, `taken_at_ms`, `uploader`, `upload_id`, `key_epoch` (Phase 10), and `exp = now + 10 min`. The public key is served at `/internal/v1/jwks.json` for the image server.
 
-**4.2 The `announce` function.** Arguments after `sid, now, retention`: `uid, sha, size, mime, taken_at, new_upload_id, cap_bytes, max_live_user, max_live_session, max_strikes, lease_ms (900000), takeover_ms (60000)`.
+**4.2 The `announce` function.** Arguments after `sid, now, retention`: `uid, sha, size, mime, taken_at, new_upload_id, cap_bytes, max_live_user, max_live_session, max_strikes, lease_ms (900000), takeover_ms (60000)`, and since Phase 10 `tag, key_epoch`. The sketch below predates Phase 10; 10.3 lists what it added (the key-epoch checks and dedupe by tag).
 
 ```lua
 local function f_announce(keys, args)
@@ -655,7 +660,7 @@ end
 Error mapping in `scripts.py`: `UPLOADS_BLOCKED` → `403 FORBIDDEN` (*Uploads blocked in this session*). `PHOTO_RECALLED` → `410`. `TOO_MANY_UPLOADS` → `429`, `Retry-After: 10`. `QUOTA_EXCEEDED` → `429`, `Retry-After: 60` (quota frees as photos expire).
 
 **4.3 `POST /v1/photos/announce`.** Body `AnnounceRequest` (with the added `session_id`).
-1. `current_user()`. Check `sha256` is 32 bytes, `size` is above 0, `taken_at_ms` is plausible (`400` otherwise). `size` over `MAX_PHOTO_BYTES`: `413 TOO_LARGE`. `mime` not in `{image/jpeg, image/png, image/webp, image/heic, image/heif}`: `415 UNSUPPORTED_FORMAT`.
+1. `current_user()`. Check `sha256` is 32 bytes, `size` is above 0, `taken_at_ms` is plausible (`400` otherwise). `size` over `MAX_PHOTO_BYTES`: `413 TOO_LARGE`. `mime` other than `application/vnd.photon.e2ee`: `415 UNSUPPORTED_FORMAT` (before Phase 10, the image types). A `photo_tag` that isn't 32 bytes, or `key_epoch` 0: `400 INVALID_REQUEST`.
 2. Rate limit 20 a minute per user: `429 RATE_LIMITED` with the window's remaining time.
 3. `announce` with `new_upload_id = uuid4().hex`.
 4. `UPLOAD`: mint a fresh token, even for an existing `upload_id` (the design's idempotent announce), and return `upload_url = <IMAGE_BASE>/v1/uploads/<id>` and `chunk_size_hint = 1 MiB`. `ALREADY_UPLOADED` and `IN_PROGRESS` return just the result.
@@ -707,7 +712,7 @@ end
 
 Python then runs `ZADD expiry:<n> LT <now> <sid>:<sha>` and calls the image server's `DELETE` at once, without waiting for it; the sweeper retries if it fails. Downloads stop immediately, because every download checks for `STORED` (Phase 5). A later announce of the same hash gets `410 PHOTO_RECALLED`.
 
-**4.8 Script client.** `photon_cli.py upload <file>`: hash, announce, then on `UPLOAD` call `GET /v1/uploads/{id}`. If `server_has_file` is set, go straight to `complete`. Otherwise send the missing chunks, three at a time, each retried up to 3 times with backoff and jitter, then loop on `complete`. `IN_PROGRESS` waits for the event (Phase 5) and `ALREADY_UPLOADED` exits. `photon_cli.py recall <hash>`.
+**4.8 Script client.** `photon_cli.py upload <file>`: encrypt (since Phase 10), hash, announce, then on `UPLOAD` call `GET /v1/uploads/{id}`. If `server_has_file` is set, go straight to `complete`. Otherwise send the missing chunks, three at a time, each retried up to 3 times with backoff and jitter, then loop on `complete`. `IN_PROGRESS` waits for the event (Phase 5) and `ALREADY_UPLOADED` exits. `photon_cli.py recall <hash>`.
 
 **4.9 Concurrency and fencing tests.** Real Redis, real image server, a real orchestrator, time driven through `now_ms`.
 - **Concurrent announce:** 10 members announce one hash at once: exactly one `UPLOAD`, nine `IN_PROGRESS`.
@@ -732,7 +737,7 @@ Python then runs `ZADD expiry:<n> LT <now> <sid>:<sha>` and calls the image serv
 
 Events come from one durable source, the session's Redis stream. Delivery is at-least-once, and the client's dedupe by `event_id` and hash makes the effect exactly-once. This phase also builds downloads, because a receiver needs them as soon as an event arrives.
 
-**5.1 Stream entries.** `append_event` (2.2) writes compact fields: `t` (type), `sha` (hex), `up` (uploader), `sz`, `ta` (taken at), `ex` (expires at) and `m` (member). It trims by age with `MINID ~ (now - retention - 1h)` and records that threshold as `trimmed_before`. `orchestrator/events.py` turns an entry into a `PhotoEvent`, with the stream id as `event_id` and the hash as raw bytes. Stream ids are compared as `(ms, seq)` tuples, never as strings.
+**5.1 Stream entries.** `append_event` (2.2) writes compact fields: `t` (type), `sha` (hex), `up` (uploader), `sz`, `ta` (taken at), `ex` (expires at) and `m` (member), and since Phase 10 `pk` (member key), `tg` (photo tag) and `ke` (key epoch). It trims by age with `MINID ~ (now - retention - 1h)` and records that threshold as `trimmed_before`. `orchestrator/events.py` turns an entry into a `PhotoEvent`, with the stream id as `event_id` and the hash as raw bytes. Stream ids are compared as `(ms, seq)` tuples, never as strings.
 
 **5.2 The resync rule.** A cursor `c` can be continued only if all three hold:
 1. `c >= trimmed_before`;
@@ -744,7 +749,7 @@ If any fails, the answer is `RESYNC_REQUIRED`. Condition 2 catches a stream miss
 **5.3 Snapshot: `GET /v1/sessions/{sid}/snapshot`.** The `snapshot` function (`no-writes`, called with `FCALL_RO`):
 1. Session not `ACTIVE`: `410 SESSION_ENDED`. Caller not a member: `403 NOT_A_MEMBER`.
 2. Read the cursor first: the session's `last_event_id`.
-3. Then the state: the member ids; every `STORED` photo with `expires_at > now`, as a `PhotoEvent` of type `PHOTO_STORED` without an `event_id`; and every `RECALLED` hash.
+3. Then the state: the member ids; every `STORED` photo with `expires_at > now`, as a `PhotoEvent` of type `PHOTO_STORED` without an `event_id` (with its photo tag and key epoch since Phase 10); every `RECALLED` hash; and the session's current key epoch.
 
 The function is atomic, so the cursor and the state are consistent. Anything stored after the cursor still arrives as an event, and the client drops it by hash. Returns `Snapshot`.
 
@@ -781,10 +786,10 @@ Each open socket holds one blocking Redis connection. That suits version 1 (10 m
    - `RECALLED`: `410 PHOTO_RECALLED`.
 3. Find the files in `photos/{sid}/{sha}/`. During the short window between the orchestrator applying the report and promotion, fall back to `tmp/{upload_id}/staged/` (the entry's `upload_id`). Still missing: `404`.
 4. Read `meta.json`. If `now >= meta.expires_at_ms`, the answer is `410 PHOTO_EXPIRED`, whatever Redis says. This is the image server's independent guard.
-5. `thumb`: send `thumb.webp`. `preview`: on first request, generate it under a per-photo lock with the `preview` worker and cache it as `preview.webp`; a failure answers `503 PROCESSING_FAILED` and the client falls back. `full`: send `original`, with single-range `Range` support (`206`, `Content-Range`, `416` for a bad range). The range code is written here rather than relying on the framework's version, and tested.
-6. Headers: `Cache-Control: private, no-store`, `ETag: "<sha>-<size>"`, `Content-Type` from the meta. There is no URL a non-member could reuse.
+5. `full`: send `file`, with single-range `Range` support (`206`, `Content-Range`, `416` for a bad range). The range code is written here rather than relying on the framework's version, and tested. `thumb` and `preview` (since Phase 10): send the file's first bytes, up to the end of the thumbnail or the preview section, computed from `header_len` and `lengths` in the meta. The receiver decrypts the prefix (e2ee.md 6.3). Before Phase 10 these were `thumb.webp` and a `preview.webp` generated on first request.
+6. Headers: `Cache-Control: private, no-store`, `ETag: "<sha>-<size>"`, `Content-Type: application/octet-stream` (the real type is encrypted). There is no URL a non-member could reuse.
 
-**5.7 Script client.** `photon_cli.py listen`: load the snapshot, connect with its cursor, print events, download each new photo's thumbnail, and save the original to a folder. It keeps `last_event_id` on disk, drops an event at or below it, drops a hash it already holds, and handles every close code in 5.5. `photon_cli.py catchup` uses 5.4.
+**5.7 Script client.** `photon_cli.py listen`: load the snapshot, connect with its cursor, print events, download and decrypt each new photo's thumbnail, and save the original to a folder. Since Phase 10 it also runs key maintenance (10.6). It keeps `last_event_id` on disk, drops an event at or below it, drops a hash it already holds, and handles every close code in 5.5. `photon_cli.py catchup` uses 5.4.
 
 **5.8 Tests.**
 - **Gap-free:** a producer appends 2 000 events while a consumer disconnects and reconnects at random points. After dedupe, the consumer has every event exactly once, in order.
@@ -900,7 +905,7 @@ Tokens are stored with Keystore-backed encryption.
 It inserts the matches as `PENDING`, advances `scan_cursor_ms`, and enqueues `upload-queue`. Camera folder names differ between manufacturers, so test the filter on Pixel, Samsung and Xiaomi devices.
 
 **7.7 Upload worker.** `UploadWorker` (a `CoroutineWorker`, network constraint, expedited when allowed, exponential backoff). It does nothing while the session is paused. For each `PENDING` or `UPLOADING` row:
-1. **Copy and hash.** Copy the image through `ContentResolver.openInputStream` into the app's cache, and compute SHA-256 over that copy. Without `ACCESS_MEDIA_LOCATION`, Android redacts location from the stream, so the copy has no GPS. The hash is over exactly the bytes uploaded. Verify this redaction for both JPEG and HEIC on test devices. If HEIC isn't redacted, strip GPS from the copy, or skip HEIC until it is decided. If the hash is in `hashes`, mark the row `SKIPPED` (echo layer 4).
+1. **Copy and hash.** Copy the image through `ContentResolver.openInputStream` into the app's cache, and compute SHA-256 over that copy. Without `ACCESS_MEDIA_LOCATION`, Android redacts location from the stream, so the copy has no GPS. The hash is over exactly the bytes uploaded. Verify this redaction for both JPEG and HEIC on test devices. If HEIC isn't redacted, strip GPS from the copy, or skip HEIC until it is decided. If the hash is in `hashes`, mark the row `SKIPPED` (echo layer 4). Since Phase 10 the worker then makes the thumbnail and preview, encrypts the copy into the photo file under the current epoch, and announces the encrypted file's hash with the photo tag (10.7).
 2. **Announce.**
    - `ALREADY_UPLOADED`: record the hash and mark the row `SYNCED`.
    - `IN_PROGRESS`: mark it `WAITING`. Another member's upload is live; a `PHOTO_STORED` event for the hash marks the row `SYNCED`. Without that event, re-announce after 2 minutes, backing off to 15. Never mark the row `SYNCED` on `IN_PROGRESS` alone: if the other upload is rejected (for example, someone announced this hash with other bytes), this device must still upload the real photo.
@@ -917,7 +922,7 @@ It inserts the matches as `PENDING`, advances `scan_cursor_ms`, and enqueues `up
 - Close codes as in 5.5: `4001` refreshes and reconnects; `4409` loads the snapshot, applies it, and reconnects from its cursor; `4403` and `4410` stop syncing.
 - Other drops reconnect with exponential backoff and jitter. On every reconnect, app start and push hint (Phase 8), run `/events?since=` first.
 
-**7.9 Receiving.** `ReceivePipeline`:
+**7.9 Receiving.** `ReceivePipeline` (since Phase 10, every fetched thumbnail, preview and original is decrypted on the device and decoded defensively, and the original is checked against the event's photo tag; 10.7):
 1. **Dedupe.** Drop an event whose id is at or below `last_event_id`, and a `PHOTO_STORED` whose hash is already in `hashes` or `received_photos`.
 2. **Thumbnail.** Fetch at once, keep it in the app cache only, and show it.
 3. **Preview.** Fetch on an unmetered network or one with `getLinkDownstreamBandwidthKbps() >= 5000`; on `503`, keep the thumbnail.
@@ -931,7 +936,7 @@ It inserts the matches as `PENDING`, advances `scan_cursor_ms`, and enqueues `up
 2. Location: received photos go to `Pictures/PHOTON/`, which both skip.
 3. Owner: rows whose `OWNER_PACKAGE_NAME` is this app are skipped.
 4. Hash set: the `hashes` table, checked after hashing.
-5. Server: the session-wide dedupe gives `ALREADY_UPLOADED`.
+5. Server: the session-wide dedupe (by photo tag since Phase 10) gives `ALREADY_UPLOADED`.
 
 Layers 1–3 come before hashing, because Android may re-encode a saved copy and change its bytes.
 
@@ -969,7 +974,7 @@ Layers 1–3 come before hashing, because Android may re-encode a saved copy and
 
 Member cap, byte quota, live uploads, temporary disk and strikes were built in Phases 2–4. A test checks every row of the design's limits table against its enforcement point.
 
-**8.2 Reporting a photo.** The design lets members report a photo but lists no endpoint, so this plan adds `POST /v1/sessions/{sid}/photos/{hash}/report` (member only, reason text up to 500 characters). It writes to a Postgres table `photo_reports` (sid, sha256, reporter, uploader, reason, created_at), counts `photo_reports_total`, and notifies the operators' channel. The photo itself is kept only until its normal expiry. The illegal-content and takedown process needs a legal review before any public launch, as the design says; this endpoint is the hook it will need.
+**8.2 Reporting a photo.** The design lets members report a photo but lists no endpoint, so this plan adds `POST /v1/sessions/{sid}/photos/{hash}/report` (member only, reason text up to 500 characters). It writes to a Postgres table `photo_reports` (sid, sha256, reporter, uploader, reason, created_at), counts `photo_reports_total`, and notifies the operators' channel. The photo itself is kept only until its normal expiry. Since Phase 10 the server can't see the reported photo; a report holds the hash and the reason only. The illegal-content and takedown process needs a legal review before any public launch, as the design says; this endpoint is the hook it will need.
 
 **8.3 Privacy controls, completed.** Check that each one exists end to end:
 - the sync indicator (the foreground notification and in-app status);
@@ -989,11 +994,11 @@ On Android, use Cronet through the `cronet-okhttp` bridge for the image-server c
 
 **8.5 Push as a hint.**
 - Device registration: `PUT /v1/devices/current` with `DeviceRegistration` on Auth. It upserts into `devices` (an endpoint added by this plan, since the design has the table but no endpoint). The client calls it on login and whenever FCM gives a new token.
-- `orchestrator/push.py`. After `APPLIED` stored, recall and session end, find the session's members whose presence (`session:{sid}:online`) is older than 90 seconds. For each, `SET push:<uid> 1 NX EX 30` coalesces a burst into one push, then send an FCM data-only message `{"sid": ..., "kind": "events"}` with the `firebase-admin` async client.
+- `orchestrator/push.py`. After `APPLIED` stored, recall and session end, find the session's members whose presence (`session:{sid}:online`) is older than 90 seconds. For each, `SET push:<uid> 1 NX EX 30` coalesces a burst into one push, then send an FCM data-only message `{"sid": ..., "kind": "events"}` with the `firebase-admin` async client. Since Phase 10 a join (other than a repeat by a current member) also sends `kind=joined` to the other members, so an app without a socket wakes up to seal the key for the newcomer.
 - On `UNREGISTERED` or `INVALID_ARGUMENT`, delete that `devices` row. Failures are logged and never retried: push is best effort and never carries photo data.
 - Client: `FirebaseMessagingService.onMessageReceived` enqueues an expedited `CatchUpWorker`. The worker runs `/events?since=` (or the snapshot on `RESYNC_REQUIRED`), feeds `ReceivePipeline`, and runs the reconcile scan. App start runs the same worker.
 
-**8.6 iOS (Swift).** The same server, and the same proto through `swift-protobuf`.
+**8.6 iOS (Swift).** The same server, and the same proto through `swift-protobuf`. Not yet updated for Phase 10: until it is, the iOS app can't create, join or upload against a server with end-to-end encryption (10.8).
 - Login with `ASWebAuthenticationSession`. Universal Links through `apple-app-site-association` (1.3). Tokens in the Keychain.
 - `PHPhotoLibraryChangeObserver` while the app is alive.
 - On launch and on return to the foreground: the reconcile scan (`PHAsset` with `creationDate` at or after the join time, `mediaSubtypes` not containing `.photoScreenshot`, not in the received set), then catch-up.
@@ -1061,9 +1066,60 @@ Run it again with one orchestrator replica killed halfway.
 - [ ] Every review finding has a passing test (next section).
 - [ ] Load test and failure drills passed.
 - [ ] Legal review of reporting and takedown done.
-- [ ] Security review: decoder sandbox, upload limits, token audiences, OAuth redirect matching, Redis ACLs.
+- [ ] Security review: the end-to-end encryption construction and its key relay (e2ee.md), the clients' image decoders, upload limits, token audiences, OAuth redirect matching, Redis ACLs.
 - [ ] The design's open decisions confirmed: Android first; 30-minute retention with deletion within 5 minutes; GPS stripped by default; 25 MB, 100 MP, 1 GB and the format allow-list; 10 members, 3 and 20 live uploads.
 - [ ] This plan's decisions confirmed: the foreground service type (`specialUse` or `dataSync`, 7.5); HEIC GPS handling (7.7); the refresh-token lifetime (30 days, 1.7); kicked users can't rejoin (2.7); code and invite lifetimes (2 hours and 12 hours, 2.4).
+
+## Phase 10 — End-to-end encryption
+
+Photos are encrypted on the uploader's phone and decrypted on members' phones. The servers store, check and serve encrypted files, and relay sealed keys they can't open. The specification, with byte layouts, is [e2ee.md](e2ee.md); the design summary is in [Design.md](Design.md#end-to-end-encryption). This phase changes Phases 2–5 in place, and the changed steps say so.
+
+**10.1 Reference implementation.** `common/e2ee.py`: identity keys, key bundles, sealing and opening, the photo tag, the file header, `encrypt_photo` and `decrypt_photo` (which also decrypts a prefix). `tools/e2ee_vectors.py` writes `tests/vectors/e2ee_v1.json` from fixed inputs: a sealed box from a fixed ephemeral key, a photo file from a fixed photo key and wrap nonce, the tag and a security code. Every client must reproduce those bytes exactly.
+
+**10.2 Wire format.** `AnnounceRequest.photo_tag = 6` and `key_epoch = 7`. `PhotoEvent.Type` gains `KEY_SHARED = 6` and `KEY_ROTATED = 7`, and `PhotoEvent` gains `member_key = 10`, `key_epoch = 11` and `photo_tag = 12`. `Snapshot.key_epoch = 5`. `CreateSessionRequest.member_key = 2` and `JoinRequest.member_key = 3`. New messages: `MemberKey`, `SealedKey`, `KeyState`, `KeyUpload` and `KeyUploadResult`.
+
+**10.3 Redis functions** (library `VERSION` 4; keys 7 and 8 in 2.1):
+- `create_session` takes the creator's member key (ARGV 9) and sets `epoch = 1`, `rotate = 0` and the creator's `ke = 1`. `MEMBER_JOINED` carries `pk`.
+- `join` takes the member key (ARGV 6). A current member rejoining with a different key (a new install) gets `ke = 0`, its sealed boxes are dropped, `MEMBER_JOINED` is appended again, and the answer is `REKEYED`.
+- `leave` and `kick` set `rotate = 1` when members remain. `remove_member` drops the member's boxes (`drop_boxes`).
+- `announce` takes `tag` and `key_epoch` (ARGV 16 and 17). After the membership and strike checks: `rotate` set → `KEY_ROTATION_REQUIRED`; `key_epoch` not current → `KEY_EPOCH_STALE`; the caller's `ke` below it → `KEY_REQUIRED`. Then dedupe by tag in `session:{sid}:tags`: a tag naming another hash that is `STORED` or `EXPIRED` → `ALREADY_UPLOADED`; `RECALLED` → `PHOTO_RECALLED`; the same uploader's unfinished reservation is released and replaced; another member's live or young reservation → `IN_PROGRESS`; a stale one is taken over. The entry records `tag` and `ke`. Releasing a reservation also removes its tag.
+- `report_stored` adds `tg` and `ke` to `PHOTO_STORED`. `snapshot` returns each live photo's tag and epoch, and the current epoch as a fifth value.
+- `key_state` (read-only): the epoch, the rotation flag, every member's `{uid, pk, ke}`, and the caller's own boxes.
+- `put_keys`, sharing (`rotate = 0`): `1 ≤ epoch ≤ current` (else `KEY_EPOCH_STALE`) and the caller's `ke ≥ epoch` (else `KEY_REQUIRED`). It stores a box only for a current member other than the caller who has none for that epoch, raises that member's `ke`, and appends `KEY_SHARED` per box. Returns the current epoch and the number stored.
+- `put_keys`, rotation (`rotate = 1`): `epoch = current + 1` (else `EPOCH_TAKEN`), the caller's `ke ≥ 1` (else `KEY_REQUIRED`), and a box for every other member (else `KEYS_INCOMPLETE`, mapped to `400 INVALID_REQUEST`). A box for the caller is stored too. It sets every member's `ke` and the epoch, clears `rotate`, and appends `KEY_ROTATED`.
+
+**10.4 Orchestrator routes.**
+- `POST /v1/sessions` and `POST /v1/sessions/join` require a 32-byte `member_key` (`400` otherwise). A join other than `ALREADY_MEMBER` sends the push `kind=joined` to the other members.
+- `GET /v1/sessions/{sid}/keys` returns `KeyState`. `POST /v1/sessions/{sid}/keys` takes `KeyUpload`: at most 64 boxes, each exactly 117 bytes for a distinct member and for the call's epoch; at least one box unless rotating, because the last remaining member rotates for itself alone. Rate limit `rl:keys:<uid>`, 60 a minute.
+- Announce checks as in 4.3, and the upload token carries `key_epoch`.
+- New error codes: `KEY_ROTATION_REQUIRED`, `KEY_EPOCH_STALE` and `EPOCH_TAKEN` (`409`), and `KEY_REQUIRED` (`403`), none retryable.
+
+**10.5 Image server.** The decoder and its settings are removed (3.7), and so is the `VERIFIED` state (3.4). `complete` checks the hash, then the header (3.8 step 9), and stores `file` and `meta.json`. Downloads serve `file` and its prefixes as `application/octet-stream` (5.6).
+
+**10.6 Reference client.**
+- `client/keyring.py`: the install's X25519 identity and, per session, the epoch bundles it holds. In memory by default. The CLI keeps it in `$PHOTON_HOME/<profile>.keys.json` (mode 600); every save merges with the file, so `listen` and `upload` can share a profile.
+- `client/images.py`: type detection (with HEIC and HEIF as one type), the 100 MP and single-frame checks, and the thumbnail (WebP, 320 px, quality 70) and preview (WebP, 1,600 px, quality 80, or empty when the original's longest side is no larger). Width and height are recorded after EXIF orientation.
+- `client/api.py`: create and join send the member key, and create keeps the new epoch-1 bundle. `key_state`, `put_keys`, `sync_keys` (key maintenance: open the boxes sealed for this install, then seal every held epoch, in ascending order, for members whose `ke` is lower) and `rotate_keys` (seal a fresh key for every member, the caller included; on `EPOCH_TAKEN` or a member joining meanwhile, look again). `download_photo` checks a full file's hash, decrypts, fetches the full file when a small original has no preview, and checks the photo tag.
+- `client/uploader.py`: `upload_bytes` prepares and encrypts the photo, then rotates on `KEY_ROTATION_REQUIRED` or syncs keys on `KEY_EPOCH_STALE` and rebuilds the file. It returns `KEY_REQUIRED` while no member has shared the key. `upload_file` uploads a file as it is, for tests.
+- `client/listener.py` runs key maintenance on start, on `MEMBER_JOINED` and `KEY_ROTATED` from others, and on `KEY_SHARED` for itself.
+- The CLI adds `keys` (security codes and held epochs), waits for the key after `join` (`--wait`), decrypts in `listen` and `download` (`--raw` keeps the encrypted bytes), and the load test shares keys before uploading.
+
+**10.7 Android.** The app implements the same protocol: an X25519 identity per install, key maintenance on the same events and on the `joined` push, encryption in the upload worker, and decryption with tag checks in the receive pipeline. `minSdk 26` has no platform X25519, so it uses Tink's X25519 and HKDF (Tink already comes in through `androidx.security`). It must reproduce `tests/vectors/e2ee_v1.json`. Its build and test state is in [android/README.md](android/README.md).
+
+**10.8 iOS.** Not started. It needs the same pieces as 10.7 (CryptoKit has X25519, HKDF and AES-GCM) and must pass the same vectors.
+
+**10.9 Decided while building.**
+- **A random photo key per file**, locked under `K_epoch` in the header, rather than a key derived from `K` and the photo's hash. Two phones make different thumbnails of the same photo, so a derived key with fixed nonces would reuse an AES-GCM key and nonce on different plaintexts. Dedupe therefore moved from the file hash to the photo tag.
+- **The server enforces rotation.** Leaving and kicking set a flag that blocks announces until a member starts the next epoch. Concurrent rotations are settled by `EPOCH_TAKEN`.
+- **The rotator seals the new key for itself too**, so a crash after the call loses nothing: it opens its own box on the next sync.
+- **A member's boxes are dropped** when they leave, are kicked or rejoin with a new member key. Otherwise the first-sealer-wins rule would keep a box nobody can open, and nobody could seal for that member again.
+- **Old epochs are shared with newcomers**, so they can read photos from earlier epochs that are still live. One rare case misses them: a newcomer whose first key comes from a rotation (it joined while one was pending and nobody shared the old epoch first) holds only the new epoch, because rotation raises every member's `ke`.
+
+**10.10 Tests.**
+- Unit (`tests/unit/test_e2ee.py`): the committed vectors equal what the reference implementation produces; the sealed box, the photo file, the header layout, the prefixes, the tag and the security code match the vectors; a flip of any byte of a file fails decryption; bad headers are refused without a key; a box opens only for its recipient, session and epoch; the keyring persists and merges.
+- Integration (`tests/integration/test_keys.py`): three people joining one after another all read every photo, and any key holder can seal for the newcomer; the server holds only ciphertext and no key; thumbnail and preview prefixes decrypt; a small original serves as its own preview; leaving requires rotation and the leaver gets no new key; a kicked member is left out of the new epoch; concurrent rotation has one winner; rotation must seal for every member; the last member rotates alone; the sharing rules; a new install rekeys; the same photo from two members dedupes by tag; a rebuilt file replaces its uploader's reservation; a receiver detects a mislabelled tag; a plaintext announce gets `415`, a plaintext file `INVALID_IMAGE`; a header with another epoch is rejected; a tampered file doesn't decrypt.
+
+*Done when* every client reproduces the vectors, and two members on different clients exchange photos in a session that one member has left, with the rotation in between.
 
 ## Review findings to steps and tests
 
@@ -1080,9 +1136,9 @@ Every finding in the design's last table, with the steps that build its fix and 
 | 7 | Concurrent uploads exceed the quota | 4.2 | 4.9 quota race |
 | 8 | Recall cannot reach offline devices | 4.7, 5.3 (recalled hashes), 7.9 step 6 | 5.8 recall gives `410`; 7.13 snapshot after reconnect clears caches |
 | 9 | Stream trimmed before a client returns | 5.2, 5.3, 5.4 | 5.8 trim |
-| 10 | Thumbnail generation fails after storage | 3.8 step 11 | 3.12 transient thumbnail failure |
+| 10 | Thumbnail generation fails after storage | 3.8 step 11 until Phase 10; now 10.6 (the uploader makes it) and 3.8 step 9 (no file without one) | 10.10 header tests |
 | 11 | Cleanup of stale uploads hits newer ones | 3.1, 3.9, 6.5 | 3.12 deletes only `tmp/{upload_id}/`; 6.8 orphan rules |
-| 12 | Resource exhaustion from temporary files | 3.5 step 4, 3.7, 3.8 step 7, 4.2 | 3.12 disk budget; 4.9 live limits |
+| 12 | Resource exhaustion from temporary files | 3.5 step 4, 3.8 step 7, 4.2 | 3.12 disk budget; 4.9 live limits |
 | 13 | Expired photo downloadable through stale state | 5.6 | 5.8 tampered `expires_at` |
 | 14 | Files whose Redis metadata is gone | 6.5 | 6.8 `FLUSHALL` |
 | 15 | Membership and status not checked everywhere | 3.3, 3.5, 3.8, 4.2, 4.4, 5.3–5.6 | 4.9 kick during upload; 5.8 non-member download |
@@ -1092,7 +1148,7 @@ Every finding in the design's last table, with the steps that build its fix and 
 | 19 | Re-encoding changes the hash | 7.9 step 5, 7.10 | 7.13 echo test |
 | 20 | Recall cannot delete saved originals | 7.11 | Review of the dialog text |
 | 21 | OAuth redirect and state validation | 1.3, 1.4, 1.5 | 1.5 tests |
-| 22 | Image validation underspecified | 3.7 | 3.12 hostile files |
+| 22 | Image validation underspecified | 3.7 until Phase 10; now 3.8 step 9 (header) and 10.6 (client checks) | 10.10 header tests; `upload_bytes` refuses invalid images |
 | 23 | Upload token invalidation | 3.3, 3.5, 3.8 | 4.9 stale report, kick; 3.12 after `STORED` |
 | 24 | No error contract | 0.4 | 0.4 table tests |
 | 25 | Quota accounting | 2.2, 4.2, 4.4, 4.5, 6.2, 6.6 | 4.9 model-based invariants; 6.8 drift |
@@ -1129,7 +1185,7 @@ This plan fills gaps the design leaves open. Each choice below should be confirm
 - Extra keys: `session:{sid}:live`, `session:{sid}:kicked`, `session:{sid}:online`, `sessions:due`, `push:<uid>`, `expiry_attempts:<n>`, `lock:*`.
 - `oauth:{state}` is a JSON string, because `GETDEL` works only on strings.
 - Refresh tokens are keyed `refresh:{family}:<hash>` with a family record `rfam:{family}`, so a rotation is atomic in one slot.
-- Image server states `VERIFIED` (named in the design's pipeline but missing from its state list), `REPORTING`, `SUPERSEDED` and `ENDED`.
+- Image server states `REPORTING`, `SUPERSEDED` and `ENDED` (and `VERIFIED`, named in the design's pipeline but missing from its state list, until Phase 10 removed it).
 - Promotion to `photos/{sid}/{sha256}/` happens after the orchestrator answers `200`, so a `409` or `410` deletes exactly that upload's directory (3.1).
 - Postgres table `photo_reports`.
 
@@ -1146,10 +1202,10 @@ This plan fills gaps the design leaves open. Each choice below should be confirm
 | --- | --- |
 | Refresh-token lifetime | 30 days |
 | Join code and invite lifetimes | 2 hours and 12 hours |
-| Thumbnail and preview size | 320 px and 1600 px on the longest edge |
+| Thumbnail and preview size | 320 px and 1600 px on the longest edge (made by the clients since Phase 10) |
 | Chunk size | 256 KiB to 8 MiB; announce hint 1 MiB |
 | Outbox backoff | 1 s to 60 s |
-| Decode limits | 1.5 GB address space, 20 s CPU, 30 s wall clock |
+| Decode limits | 1.5 GB address space, 20 s CPU, 30 s wall clock (removed with the decoder in Phase 10) |
 | Rate limits | 10 session creates an hour, 20 OAuth calls a minute per IP, 10 refreshes a minute per family, 50 requests a second per IP at the proxy |
 | Expiry shards | 16 |
 | Recount interval | 5 minutes |
@@ -1168,10 +1224,10 @@ These came up while the plan met real code, Redis 7.2 and the tests. Each one is
 
 **Image server**
 - **`complete` without any chunk is accepted** when the lease exists. The state is created from the token, so the Redis-loss path (`server_has_file`, then straight to `complete`) works. Found by `test_redis_loss_after_storage_reuses_the_file`.
-- **Trailing data after a valid image is accepted.** Motion photos from Pixel and Samsung cameras append a video after the JPEG, and rejecting them would refuse ordinary camera photos. The design's checks (allow-list, magic bytes, dimensions, frames, full decode) all still apply. This replaces the plan's JPEG/ZIP polyglot test.
+- **Trailing data after a valid image is accepted.** Motion photos from Pixel and Samsung cameras append a video after the JPEG, and rejecting them would refuse ordinary camera photos. The design's checks (allow-list, magic bytes, dimensions, frames, full decode) all still apply. This replaces the plan's JPEG/ZIP polyglot test. Since Phase 10 these checks run in the uploader's app, which accepts the same files.
 - **Downloads never cache membership**, which is stricter than the design's 2 seconds. The photo's status has to be read on every request anyway, so the cache saved nothing.
-- **Decoder limits are set by the worker itself** at startup (`resource.setrlimit`), not through `preexec_fn`, which isn't safe with threads. A fresh process per decode keeps the CPU limit per image.
-- **HEIC and HEIF count as one type** when the declared MIME is compared with the detected brand (`mif1` files are commonly sent as `image/heic`).
+- **Decoder limits were set by the worker itself** at startup (`resource.setrlimit`), not through `preexec_fn`, which isn't safe with threads. The decoder was removed in Phase 10.
+- **HEIC and HEIF count as one type** when the declared MIME is compared with the detected brand (`mif1` files are commonly sent as `image/heic`). Since Phase 10 the reference client does this comparison (`client/images.py`).
 
 **API**
 - `GET /v1/sessions/{sid}` returns `SessionInfo`. `SessionInfo` gains `member_ids` and `host_id`, and `ReportPhotoRequest` is the body of a photo report.

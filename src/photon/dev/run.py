@@ -2,8 +2,10 @@
 services. API (Auth + orchestrator behind one base URL) on :8080, image server on :8081.
 
     python -m photon.dev.run [--host 0.0.0.0] [--data .devdata]
+    python -m photon.dev.run --api-url https://api.example.com --image-url https://img.example.com --dev-login local
 
-Development only: plain HTTP, the dev login provider, jobs on short intervals. Never expose it to other people.
+Development only: plain HTTP, the dev login provider, jobs on short intervals. To reach it from outside this
+machine through Cloudflare Tunnel, give the public URLs and restrict the dev login: see cloudflare.md.
 """
 
 from __future__ import annotations
@@ -82,6 +84,12 @@ def main() -> None:
     ap.add_argument("--host", default="127.0.0.1", help="0.0.0.0 to reach it from an emulator or phone")
     ap.add_argument("--data", default=str(ROOT / ".devdata"))
     ap.add_argument("--public-host", default=None, help="host name phones use (default: --host)")
+    ap.add_argument("--api-url", default=None,
+                    help="public API URL, e.g. a tunnel's https://... (default: http://<public-host>:8080)")
+    ap.add_argument("--image-url", default=None,
+                    help="public image server URL (default: http://<public-host>:8081)")
+    ap.add_argument("--dev-login", choices=["on", "local", "off"], default="on",
+                    help="username sign-in: on, local (only from this machine, not through a tunnel), or off")
     args = ap.parse_args()
     data = Path(args.data).resolve()
     data.mkdir(parents=True, exist_ok=True)
@@ -93,14 +101,16 @@ def main() -> None:
     migrate.upgrade(db_url)
     ensure_keys(data / "keys")
     public = args.public_host or ("127.0.0.1" if args.host == "0.0.0.0" else args.host)
+    api_url = (args.api_url or f"http://{public}:8080").rstrip("/")
+    image_url = (args.image_url or f"http://{public}:8081").rstrip("/")
     settings = Settings(
         env="dev", redis_url="redis://127.0.0.1:6390/0", database_url=db_url, storage_root=data / "storage",
-        keys_dir=data / "keys", api_base_url=f"http://{public}:8080", image_base_url=f"http://{public}:8081",
+        keys_dir=data / "keys", api_base_url=api_url, image_base_url=image_url, dev_login=args.dev_login,
         orchestrator_internal_url="http://127.0.0.1:8080", imageserver_internal_url="http://127.0.0.1:8081",
         sweeper_interval_s=15, session_sweeper_interval_s=15, recount_interval_s=60, imageserver_sweep_interval_s=15,
         trusted_proxies=[],
     )
-    print(f"PHOTON dev stack: API http://{public}:8080  images http://{public}:8081  data {data}")
+    print(f"PHOTON dev stack: API {api_url}  images {image_url}  dev login {args.dev_login}  data {data}")
     try:
         asyncio.run(serve(settings, args.host))
     finally:

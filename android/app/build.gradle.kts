@@ -81,7 +81,16 @@ android {
     sourceSets {
         // Room schema JSON is exported here and used by migration tests.
         getByName("androidTest").assets.srcDir("$projectDir/schemas")
+        // The end-to-end encryption test vectors are shared with the backend (tests/vectors/e2ee_v1.json);
+        // the unit tests read them in place, so the Kotlin can never drift from the Python reference.
+        getByName("test").resources.srcDir(rootProject.file("../tests/vectors"))
     }
+}
+
+// E2eeCrossCheckTest writes a Kotlin-sealed box and a Kotlin-built photo file here for the Python reference to
+// open; declared so a cached test run restores it.
+tasks.matching { it.name == "testDebugUnitTest" }.configureEach {
+    outputs.file(layout.buildDirectory.file("e2ee-crosscheck.json"))
 }
 
 // The wire format lives in the repository's proto/ directory and is shared with the backend.
@@ -120,6 +129,8 @@ dependencies {
     implementation(libs.work.runtime.ktx)
     implementation(libs.datastore.preferences)
     implementation(libs.security.crypto)
+    // X25519 and HKDF for end-to-end encryption (minSdk 26 has no platform X25519).
+    implementation(libs.tink.android)
     implementation(libs.androidx.browser)
     implementation(libs.androidx.exifinterface)
 

@@ -211,3 +211,42 @@ async def test_google_url_has_pkce_and_state() -> None:
                               nonce="n1")
     q = parse_qs(urlparse(url).query)
     assert q["code_challenge_method"] == ["S256"] and q["state"] == ["s1"] and q["nonce"] == ["n1"]
+
+
+async def test_local_dev_login_refuses_requests_through_a_tunnel(env: Stack) -> None:
+    """dev_login="local" (cloudflare.md): the CLI on the server's machine can sign in; anyone coming through a proxy
+    or tunnel, which always adds forwarding headers, can't, and the apps don't offer the button to them."""
+    env.settings.dev_login = "local"
+    tunnel = {"X-Forwarded-For": "203.0.113.7", "CF-Connecting-IP": "203.0.113.7"}
+    async with httpx.AsyncClient(base_url=env.api_url) as http:
+        for headers in (tunnel, {"CF-Ray": "8d1e-LHR"}, {"X-Forwarded-For": "127.0.0.1"}):
+            resp = await http.post("/v1/auth/dev/login", headers={**headers, "Content-Type": "application/x-protobuf"},
+                                   content=pb.DevLoginRequest(username="mallory").SerializeToString())
+            assert resp.status_code == 400, headers
+            conf = pb.AuthConfig()
+            conf.ParseFromString((await http.get("/v1/auth/config", headers=headers)).content)
+            assert not conf.dev_login
+        start = await http.post("/v1/auth/oauth/start", headers={**tunnel, "Content-Type": "application/x-protobuf"},
+                                content=pb.OAuthStartRequest(provider="dev", redirect_uri=DEV_REDIRECT,
+                                                             code_challenge=pkce_pair()[1]).SerializeToString())
+        assert start.status_code == 400
+        conf.ParseFromString((await http.get("/v1/auth/config")).content)
+        assert conf.dev_login
+    local = PhotonClient(env.api_url, env.image_url)
+    try:
+        assert (await local.login_dev("alice")).user_id  # made on this machine: allowed
+    finally:
+        await local.aclose()
+
+
+async def test_dev_login_rebases_the_sign_in_page_onto_the_clients_api_url(env: Stack) -> None:
+    """The server names its public address in the dev sign-in URL; a client on the server's machine reaches the
+    page through its own API URL instead (a tunnel hostname may not even resolve there)."""
+    saved = env.settings.api_base_url
+    env.settings.api_base_url = "https://api.tunnel.invalid"
+    c = PhotonClient(env.api_url, env.image_url)
+    try:
+        assert (await c.login_dev("bob")).user_id
+    finally:
+        env.settings.api_base_url = saved
+        await c.aclose()

@@ -9,6 +9,9 @@
 #   scripts/phone-install.sh --lan 192.168.1.20 [--all]
 #                                        Wi-Fi instead of USB: build for this computer's address, install on any
 #                                        phones plugged in now, and print the APK to copy to the others
+#   scripts/phone-install.sh --urls https://api.example.com https://img.example.com [--all]
+#                                        any network, through Cloudflare Tunnel (cloudflare.md): build for these
+#                                        URLs, then install as with --lan
 #
 # One phone of several: ANDROID_SERIAL=<serial from `adb devices`> scripts/phone-install.sh
 set -euo pipefail
@@ -21,13 +24,17 @@ REVERSE_ONLY=0
 LOGS=0
 ALL=0
 LAN=""
+URL_API=""
+URL_IMAGE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --reverse) REVERSE_ONLY=1 ;;
     --logs) LOGS=1 ;;
     --all) ALL=1 ;;
     --lan) shift; LAN="${1:-}"; [ -n "$LAN" ] || { echo "--lan needs this computer's address" >&2; exit 2; } ;;
-    -h|--help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --urls) shift; URL_API="${1:-}"; shift; URL_IMAGE="${1:-}"
+            [ -n "$URL_API" ] && [ -n "$URL_IMAGE" ] || { echo "--urls needs the API URL and the image URL" >&2; exit 2; } ;;
+    -h|--help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "Unknown option: $1 (see --help)" >&2; exit 2 ;;
   esac
   shift
@@ -36,10 +43,23 @@ if [ "$ALL" = 1 ] && [ "$LOGS" = 1 ]; then
   echo "--logs follows one phone; with --all, follow each one with: adb -s <serial> logcat -s PHOTON" >&2
   exit 2
 fi
-if [ -n "$LAN" ]; then
+if [ -n "$LAN" ] && [ -n "$URL_API" ]; then
+  echo "Use --lan or --urls, not both" >&2
+  exit 2
+fi
+REMOTE=""   # set when the phones reach the backend over a network (Wi-Fi or a tunnel), not over USB
+if [ -n "$URL_API" ]; then
+  # Through a tunnel the phones reach the backend at its public URLs, from any network.
+  [ "$REVERSE_ONLY" = 0 ] || { echo "--reverse is for USB; with --urls there is nothing to forward" >&2; exit 2; }
+  REMOTE=1
+  API="${URL_API%/}"
+  IMAGE="${URL_IMAGE%/}"
+  WAIT_S="${PHONE_WAIT_S:-3}"
+elif [ -n "$LAN" ]; then
   # Over Wi-Fi the phone reaches this computer by its address: no USB port forwarding, and no phone has to be
   # plugged in (the APK can be copied over).
   [ "$REVERSE_ONLY" = 0 ] || { echo "--reverse is for USB; with --lan there is nothing to forward" >&2; exit 2; }
+  REMOTE=1
   API="http://$LAN:8080"
   IMAGE="http://$LAN:8081"
   WAIT_S="${PHONE_WAIT_S:-3}"
@@ -84,7 +104,7 @@ while :; do
     SERIALS="$ready"
     break
   fi
-  if [ -z "$LAN" ]; then
+  if [ -z "$REMOTE" ]; then
     if [ -n "${waiting// /}" ]; then
       hint="Unlock each phone and accept the \"Allow USB debugging\" prompt (waiting for: ${waiting// /})."
     else
@@ -96,7 +116,7 @@ while :; do
     fi
   fi
   if [ "$SECONDS" -ge "$deadline" ]; then
-    if [ "$count" -ge 1 ] || [ -n "$LAN" ]; then
+    if [ "$count" -ge 1 ] || [ -n "$REMOTE" ]; then
       [ "$count" -ge 1 ] && [ -n "${waiting// /}" ] && \
         echo "Continuing with the ready phones; the others still need to accept USB debugging." >&2
       SERIALS="$ready"
@@ -117,13 +137,16 @@ for s in $SERIALS; do
     SERIALS="$(printf '%s\n' $SERIALS | grep -vFx "$s" || true)"
   fi
 done
-[ -n "$SERIALS" ] || [ -n "$LAN" ] || exit 1
+[ -n "$SERIALS" ] || [ -n "$REMOTE" ] || exit 1
 
 # 2. The backend must be up and reachable at the address the app will use
 for url in "$API/readyz" "$IMAGE/readyz"; do
   if ! curl -sf -m 3 "$url" >/dev/null 2>&1; then
     echo "Warning: the backend isn't answering on $API and $IMAGE." >&2
-    if [ -n "$LAN" ]; then
+    if [ -n "$URL_API" ]; then
+      echo "         Check the tunnels are running and the backend was started with --api-url $API --image-url $IMAGE" >&2
+      echo "         (continuing anyway)." >&2
+    elif [ -n "$LAN" ]; then
       echo "         Start it with: scripts/phone-backend.sh --host 0.0.0.0 --public-host $LAN (continuing anyway)." >&2
     else
       echo "         Start it in another terminal with scripts/phone-backend.sh (continuing anyway)." >&2
@@ -133,7 +156,7 @@ for url in "$API/readyz" "$IMAGE/readyz"; do
 done
 
 # 3. USB: each phone's 127.0.0.1:8080 and :8081 reach this machine
-if [ -z "$LAN" ]; then
+if [ -z "$REMOTE" ]; then
   for s in $SERIALS; do
     "$ADB" -s "$s" reverse tcp:8080 tcp:8080 >/dev/null
     "$ADB" -s "$s" reverse tcp:8081 tcp:8081 >/dev/null
@@ -156,8 +179,9 @@ done
 
 n="$(printf '%s\n' $SERIALS | grep -c . || true)"
 echo
-if [ -n "$LAN" ]; then
-  echo "Built for Wi-Fi: the app talks to $API and $IMAGE. Every phone in the session needs this build."
+if [ -n "$REMOTE" ]; then
+  echo "Built for $( [ -n "$LAN" ] && echo Wi-Fi || echo the tunnel ): the app talks to $API and $IMAGE." \
+       "Every phone in the session needs this build."
   echo "Phones not plugged in: copy this file to the phone and open it (allow \"Install unknown apps\"):"
   echo "  $APK"
   echo "Check each phone reaches the server first: open $API/healthz in its browser; it should show \"ok\"."
@@ -174,7 +198,7 @@ cat <<GUIDE
        .venv/bin/photon-cli --profile bob join <CODE>
        .venv/bin/photon-cli --profile bob listen --save-dir ./received
 GUIDE
-if [ -z "$LAN" ]; then
+if [ -z "$REMOTE" ]; then
   echo "After replugging a cable: $0 --reverse$( [ "$ALL" = 1 ] && echo " --all" || true)"
 fi
 echo "App log: $ADB -s <serial> logcat -s PHOTON"

@@ -1,0 +1,41 @@
+% System architecture block diagram
+\begin{tikzpicture}
+% clients
+\node[cli, minimum width=27mm] (and) at (3.4,0) {\textbf{Android app}\\\scriptsize Kotlin, WorkManager};
+\node[cli, minimum width=27mm] (ios) at (7.9,0) {\textbf{iOS app}\\\scriptsize Swift, PhotonKit};
+\node[cli, minimum width=27mm] (cl) at (12.4,0) {\textbf{CLI and load test}\\\scriptsize Python client};
+% edge
+\node[edgeb, minimum width=114mm, minimum height=10mm] (caddy) at (7.9,-2.0) {\textbf{Caddy edge proxy}: TLS 1.3 termination, HTTP/3 over QUIC (UDP 443),\\HTTP/2 fallback (TCP 443), Alt-Svc, request limits, private routes blocked};
+% services
+\node[svc, minimum width=24mm] (auth) at (3.4,-4.4) {\textbf{Auth} $\times 2$\\\scriptsize OAuth, PKCE, JWT};
+\node[svc, minimum width=24mm] (orch) at (7.9,-4.4) {\textbf{Orchestrator} $\times 2$\\\scriptsize sessions, events, WS};
+\node[svc, minimum width=24mm] (img) at (12.4,-4.4) {\textbf{Image server}\\\scriptsize chunks, verify, serve};
+% stores
+\node[store] (pg) at (3.4,-6.9) {Postgres 16\\\scriptsize accounts};
+\node[store, minimum width=26mm] (redis) at (7.9,-6.9) {Redis 7.2\\\scriptsize Functions, Streams};
+\node[store] (disk) at (12.4,-6.9) {Local disk\\\scriptsize photos, outbox};
+% externals
+\node[ext, minimum width=21mm] (push) at (-0.2,-2.0) {\textbf{FCM / APNs}\\\scriptsize push hint};
+\node[ext, minimum width=21mm] (idp) at (-0.2,-4.4) {\textbf{Google / GitHub}\\\scriptsize OAuth / OIDC};
+% client <-> edge
+\draw[darr] (and.south) -- node[lbl]{HTTPS + WSS} (and|-caddy.north);
+\draw[darr] (ios.south) -- node[lbl]{HTTPS + WSS} (ios|-caddy.north);
+\draw[darr] (cl.south) -- node[lbl]{HTTP/3 or HTTP/2} (cl|-caddy.north);
+% edge -> services
+\draw[arr] (auth|-caddy.south) -- node[lbl, pos=0.3]{/v1/auth/*} (auth.north);
+\draw[arr] (orch|-caddy.south) -- node[lbl]{/v1/*, /v1/ws} (orch.north);
+\draw[arr] (img|-caddy.south) -- node[lbl]{uploads,\\downloads} (img.north);
+% internal report (the highlighted arrow)
+\draw[hot] ([yshift=2.2mm]img.west) -- node[lblc, above=0.5mm]{stored / rejected} ([yshift=2.2mm]orch.east);
+\draw[dsh] ([yshift=-2.2mm]orch.east) -- node[lblc, below=0.5mm]{DELETE} ([yshift=-2.2mm]img.west);
+% stores
+\draw[darr] (auth.south) -- node[lbl]{users,\\identities} (pg.north);
+\draw[darr] (orch.south) -- node[lbl]{FCALL,\\XREAD} (redis.north);
+\draw[darr] (img.south) -- node[lbl]{fsync,\\rename} (disk.north);
+\draw[arr] (auth.south east) -- node[lbl, pos=0.55]{refresh,\\oauth state} (redis.north west);
+\draw[dsh] (img.south west) -- node[lbl, pos=0.55]{lease\\(read-only)} (redis.north east);
+% externals
+\draw[darr] (auth.west) -- node[lbl]{code\\exchange} (idp.east);
+\draw[dsh] ([xshift=3mm]orch.north west) -- ++(0,0.4) -| node[lbl, pos=0.4]{wake-up hint} (push.south);
+\draw[dsh] (push.north) |- (and.west);
+\end{tikzpicture}

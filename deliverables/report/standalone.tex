@@ -1,0 +1,9 @@
+% Renders one figure on its own page: pdflatex "\def\fig{arch}\input{standalone}"
+\documentclass[border=6pt]{standalone}
+\usepackage[T1]{fontenc}
+\usepackage{mathptmx}
+\usepackage{amssymb,pifont}
+\input{figstyle}
+\begin{document}
+\input{figures/\fig}
+\end{document}

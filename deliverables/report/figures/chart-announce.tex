@@ -1,0 +1,18 @@
+% Announce over HTTP: throughput and latency against concurrency (tests/bench, Nov 2026)
+\begin{tikzpicture}
+\begin{axis}[name=a, width=7.4cm, height=5.4cm, ybar, bar width=14pt, ymin=0, ymax=850,
+  symbolic x coords={1,16,64}, xtick=data, xlabel={concurrent clients}, ylabel={requests / s},
+  nodes near coords, nodes near coords style={font=\scriptsize}, title={\small (a) Throughput},
+  enlarge x limits=0.25, axis lines*=left, ymajorgrids, grid style={gray!25}, tick label style={font=\scriptsize}, label style={font=\small}]
+\addplot[fill=pblue, draw=navy] coordinates {(1,545) (16,696) (64,704)};
+\end{axis}
+\begin{axis}[at={(a.east)}, anchor=west, xshift=1.6cm, width=7.4cm, height=5.4cm, ymin=0, ymax=105,
+  xmode=log, log basis x=2, xtick={1,16,64}, xticklabels={1,16,64}, xlabel={concurrent clients}, ylabel={mean latency (ms)},
+  title={\small (b) Latency vs.\ Little's law $W = L/\lambda$}, legend style={font=\scriptsize, at={(0.03,0.97)}, anchor=north west, draw=gray!40},
+  axis lines*=left, ymajorgrids, grid style={gray!25}, tick label style={font=\scriptsize}, label style={font=\small}]
+\addplot[mark=*, color=pblue, line width=1pt] coordinates {(1,1.66) (16,19.16) (64,75.48)};
+\addlegendentry{measured mean}
+\addplot[mark=square*, color=redtab, dashed, line width=1pt] coordinates {(1,1.83) (16,22.99) (64,90.91)};
+\addlegendentry{predicted $L/\lambda$}
+\end{axis}
+\end{tikzpicture}

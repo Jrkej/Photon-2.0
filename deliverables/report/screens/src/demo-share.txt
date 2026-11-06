@@ -1,0 +1,27 @@
+$ photon-cli --profile alice login
+logged in as 07d2d064-e083-4be2-9704-12993284eb0f
+
+$ photon-cli --profile bob login
+logged in as fee37c28-7aa9-4938-8912-d2e116f0702b
+
+$ photon-cli --profile alice create
+session  JzTJvmyAkb--B98cmtQ64w
+role     host
+code     1H17G5T9
+invite   https://photon.example/j/yyjP8QY3ccmaWnZubomrmA
+members  07d2d064-e083-4be2-9704-12993284eb0f
+
+$ photon-cli --profile bob join 1H17G5T9
+session  JzTJvmyAkb--B98cmtQ64w
+role     member
+code     1H17G5T9
+invite   https://photon.example/j/yyjP8QY3ccmaWnZubomrmA
+members  07d2d064-e083-4be2-9704-12993284eb0f, fee37c28-7aa9-4938-8912-d2e116f0702b
+
+$ photon-cli --profile alice upload pics/IMG_2041.jpg pics/IMG_2042.jpg
+IMG_2041.jpg: STORED b0423e8f021f3aa8
+IMG_2042.jpg: STORED a6e1d483ff4eb9a6
+
+$ photon-cli --profile alice upload pics/IMG_2041.jpg
+IMG_2041.jpg: ALREADY_UPLOADED b0423e8f021f3aa8
+

@@ -62,20 +62,35 @@ cd ~/dev/Photon
 .venv/bin/photon-cli --profile bob listen --save-dir ./received
 ```
 
-Leave `listen` running: every photo the phone shares is printed and saved to `./received/`. A second phone works too; install the app on it and join with the code.
+Leave `listen` running: every photo the phone shares is printed, decrypted and saved to `./received/`. A second phone works too; install the app on it and join with the code.
+
+Photos are end-to-end encrypted ([e2ee.md](e2ee.md)), so bob needs the session key before he can upload or decrypt anything. The phone made that key when it created the session, and it seals the key for bob when it sees him join: at once if the app is open, otherwise after the `joined` push wakes it. `join` waits up to 15 seconds for the key (`--wait` changes that). If it prints `waiting for a member to share the session key`, open the app on the phone; `listen` picks the key up as soon as it arrives. `photon-cli --profile bob keys` shows which key epochs bob holds, and everyone's security code. Bob's keys live in `~/.photon/bob.keys.json`.
 
 ## What to test
 
 | Test | How | Expected |
 | --- | --- | --- |
-| App open | Take a photo while PHOTON is on screen | A line in terminal 3 and a file in `./received/` within a few seconds |
+| App open | Take a photo while PHOTON is on screen | A line in terminal 3 and a decrypted file in `./received/` within a few seconds |
 | Background | Press Home, open the camera, take a photo | The same, within a few seconds |
 | App swiped away | Swipe PHOTON from recents, then take a photo | The same; the sharing notification stays or comes back |
 | Phone receives | In a fourth terminal: `.venv/bin/photon-cli --profile bob upload some.jpg` | It appears on the phone, and in its gallery under **Pictures/PHOTON** |
 | Recall | Recall a shared photo in the app | Terminal 3 prints `PHOTO_RECALLED` |
 | Leave | Tap Leave in the app | Terminal 3 prints the member leaving; sharing stops |
 
-Other `photon-cli` commands: `info`, `snapshot`, `catchup`, `recall <sha>`, `download <sha>`, `leave`, `end`.
+Other `photon-cli` commands: `keys`, `info`, `snapshot`, `catchup`, `recall <sha>`, `download <sha>` (decrypted; `--raw` keeps the encrypted file), `leave`, `end`.
+
+### Without a phone: two CLI profiles
+
+The same works between two profiles on the computer. Some member's client must be running key maintenance when the other joins, so start the creator's listener first:
+
+```bash
+.venv/bin/photon-cli --profile alice login && .venv/bin/photon-cli --profile alice create   # prints <CODE>
+.venv/bin/photon-cli --profile alice listen &          # seals the session key for whoever joins
+.venv/bin/photon-cli --profile bob login && .venv/bin/photon-cli --profile bob join <CODE>  # waits for the key: "epoch 1 received"
+.venv/bin/photon-cli --profile bob upload some.jpg     # alice's listener prints PHOTO_STORED
+```
+
+If alice isn't listening, bob's `join` gives up waiting after 15 seconds. Run `photon-cli --profile alice keys`, which also seals the key for bob, and then bob's `listen` or `keys` picks it up. The server only ever sees bob's public key and a sealed box: [e2ee.md §5](e2ee.md#5-relaying-keys-through-the-server).
 
 ## Two (or more) phones
 
@@ -105,6 +120,8 @@ What to test:
 Diagnosing one phone of several: `ANDROID_SERIAL=<serial> scripts/phone-diagnose.sh` (serials from `adb devices`). The app log of each: `adb -s <serial> logcat -s PHOTON`.
 
 ### Over Wi-Fi (a phone that isn't plugged in)
+
+For phones on another network or on mobile data, put the backend behind Cloudflare Tunnel instead: [cloudflare.md](cloudflare.md).
 
 Both phones and this computer must be on the same Wi-Fi. This exposes the development backend, which has no real sign-in, to your network, so only do it on a network you trust.
 
@@ -140,8 +157,10 @@ The usual causes, in order:
 3. **The phone shows "unauthorized"** in the report. Unlock it and accept the USB debugging prompt.
 4. **"Sync service: NOT RUNNING"** while you're in a session. Open the app once; it restarts the service. If it keeps stopping, the report's "Why the process last died" and app log sections show why.
 5. **Wi-Fi: the browser shows `ok` at `/healthz`, but the app says it can't reach the server.** The app on the phone was built for USB (`127.0.0.1`, which over Wi-Fi is the phone itself). Run `scripts/phone-install.sh --lan <address>` and install the new APK ([Over Wi-Fi](#over-wi-fi-a-phone-that-isnt-plugged-in), steps 4 and 5).
+6. **A member is still waiting for the session key.** Uploads answer `KEY_REQUIRED`, and nothing decrypts. No member who holds the key has run key maintenance since the newcomer joined. Open the app on a phone that has been in the session longer, or run `photon-cli --profile <a member> keys`. `photon-cli --profile <newcomer> keys` shows `held none yet` until a key arrives.
 
 ## Starting over
 
 - Reset all local data (accounts, sessions, photos, keys): stop the backend and delete `.devdata/`.
+- Reset the CLI profiles' sign-ins and end-to-end keys: delete `~/.photon/` (or `$PHOTON_HOME`).
 - Remove the app from the phone: `adb uninstall com.photon.app`.

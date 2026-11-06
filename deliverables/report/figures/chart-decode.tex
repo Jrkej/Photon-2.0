@@ -1,0 +1,13 @@
+% Sandboxed decode cost by image type
+\begin{tikzpicture}
+\begin{axis}[width=14cm, height=5.6cm, ybar, bar width=10pt, ymin=0, ymax=900,
+  symbolic x coords={tiny JPEG,JPEG 1600x1200,JPEG 12 MP,HEIC 12 MP}, xtick=data,
+  ylabel={milliseconds}, nodes near coords, nodes near coords style={font=\tiny, rotate=90, anchor=west},
+  area legend, legend style={font=\scriptsize, at={(0.02,0.97)}, anchor=north west, draw=gray!40}, legend columns=3,
+  axis lines*=left, ymajorgrids, grid style={gray!25}, tick label style={font=\scriptsize}, label style={font=\small}, enlarge x limits=0.15]
+\addplot[fill=pblue, draw=navy] coordinates {(tiny JPEG,47.6) (JPEG 1600x1200,59.4) (JPEG 12 MP,96.8) (HEIC 12 MP,574)};
+\addplot[fill=greenline, draw=greentab] coordinates {(tiny JPEG,64.0) (JPEG 1600x1200,89.3) (JPEG 12 MP,151) (HEIC 12 MP,625)};
+\addplot[fill=orangeline, draw=orangeline!70!black] coordinates {(tiny JPEG,72.8) (JPEG 1600x1200,203) (JPEG 12 MP,325) (HEIC 12 MP,801)};
+\legend{validate, thumbnail (320 px), preview (1600 px)}
+\end{axis}
+\end{tikzpicture}

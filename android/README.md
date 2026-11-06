@@ -20,6 +20,8 @@ sdk.dir=/path/to/Android/Sdk
 
 Versions: Gradle 8.9 (wrapper), Android Gradle plugin 8.7.3, Kotlin 2.0.21, compileSdk/targetSdk 34, minSdk 26. The first build downloads dependencies from Google Maven and Maven Central.
 
+`./gradlew testDebugUnitTest` also writes `app/build/e2ee-crosscheck.json`: a box sealed and a photo file built by the Kotlin code, with every input the Python reference needs to open them (see [End-to-end encryption](#end-to-end-encryption)).
+
 ## Configuration
 
 ### Base URLs
@@ -99,9 +101,22 @@ FCM is optional. Without `app/google-services.json` the Google Services plugin i
 3. Install and launch: `./gradlew installDebug`, then open PHOTON.
 4. Sign in: "Continue with Google", or (debug) type any username under "Developer sign-in".
 5. Start a session (the code and QR appear), or join one by code, by scanning the QR, or by opening an invite link. Grant photo access ("Allow all") and notifications.
-6. Take a photo with the camera app. It is queued, uploaded in chunks, and shows as "Shared". Other members (another emulator, or `tools/photon_cli.py listen`) receive it: thumbnail first, then preview, then the original in `Pictures/PHOTON/`.
+6. Take a photo with the camera app. It is queued, encrypted, uploaded in chunks, and shows as "Shared". Other members (another emulator, or `tools/photon_cli.py listen`) receive it: thumbnail first, then preview, then the original in `Pictures/PHOTON/`. A member who just joined sees "Waiting for a member to share the key" until another member's app (online, or woken by the `joined` push) has sealed the session key for it.
 
 Logs: `adb logcat -s PHOTON`.
+
+## End-to-end encryption
+
+Photos are encrypted on the phone; the server stores and serves only ciphertext and sealed keys it can't open. The format and the protocol are `../e2ee.md`; the reference implementation is `../src/photon/common/e2ee.py`, and the Kotlin is byte-compatible with it.
+
+- **Crypto** (`e2ee/`, plain Kotlin with no Android types, so it runs in JVM tests): X25519 and HKDF-SHA256 from Google Tink (`com.google.crypto.tink.subtle`; minSdk 26 has no platform X25519), AES-256-GCM, HMAC-SHA256 and SHA-256 from JCA. Bundles (69 bytes), sealed boxes (117 bytes), the photo file (85-byte header and four AES-GCM sections), header checks as Python's `parse_header`, prefix decryption, re-encryption for a new epoch, photo tags, security codes, and the metadata JSON. Tink 1.8.0 was already in the APK through `androidx.security:security-crypto`, but only on the runtime classpath, so it is now declared directly (the same artifact and version, nothing new is downloaded).
+- **Keys on the phone** (`data/prefs/EncryptedKeyStore.kt`): the member key pair is made once per install; the private half and every session's bundles (`K_e` and `D` by epoch) live in their own EncryptedSharedPreferences file (AES-256-GCM under a Keystore key), apart from the tokens. Ending a session locally clears the bundles; the member key stays. The public half goes as `member_key` with create and join; the creator makes epoch 1 itself before calling create.
+- **Key maintenance** (`keys/KeyManager.kt`, `keys/KeySync.kt`, e2ee.md 5.3): `GET /keys`, open the boxes addressed to this phone (one that doesn't open, or that carries another tag key, is ignored), and when this phone holds the current epoch, seal every held epoch above each other member's `key_epoch`, one `POST /keys` per epoch. It runs after create, join and opening a session, on `MEMBER_JOINED`, `KEY_SHARED` for this user and `KEY_ROTATED` (from the event pipeline, merged and in-process), after every snapshot, and in `CatchUpWorker` (app start, every push hint including `kind=joined`, the 15-minute safety net). Runs are serialised per session and idempotent. If the server holds another member key for this user (another install, or lost keys), the app joins again with its own key once, so members seal for it (`REKEYED`). Afterwards, uploads waiting for the key become due and downloads waiting for an epoch key run again.
+- **Uploads** (`upload/`): after the GPS-stripped copy and its hash, `PhotoPackager` checks the image as the reference client does (magic bytes match the declared type, HEIC and HEIF counting as one; not an animated WebP or PNG; decodable; at most 100 million pixels; otherwise `INVALID_IMAGE`, not shared), makes the thumbnail (WebP, 320 px) and preview (WebP, 1,600 px, empty when the original is no larger) with EXIF orientation applied, computes the tag from the stripped original, and builds the file for the current epoch, refusing more than 25 MiB in all. The encrypted file is the queue row's copy, so a re-announce sends the same bytes; it is announced as `application/vnd.photon.e2ee` with `photo_tag` and `key_epoch`. `KEY_ROTATION_REQUIRED` rotates (a fresh key sealed for every member, this phone included; `EPOCH_TAKEN` or a join meanwhile means looking again), `KEY_EPOCH_STALE` runs maintenance; both rebuild the file (decrypted and encrypted again with a fresh photo key) and announce again. `KEY_REQUIRED`, or no current key on the phone, defers the row ("Waiting for the session key") until maintenance brings the key. A file built for an older epoch is rebuilt before it is announced.
+- **Receiving** (`receive/`): thumbnails and previews are byte prefixes of the encrypted file, decrypted with the epoch key the header names. A key the phone doesn't hold yet never fails a photo: the job ends, maintenance runs, and the download is resumed once the key is there. The full download must hash to the event's `sha256` (the encrypted file's hash); the decrypted original must match the event's `photo_tag` and the type its metadata names, or the photo is marked failed ("Couldn't be verified") and not saved. Saved originals keep the old echo-prevention order (`IS_PENDING`, `received_assets`, then `hashes`, which now holds both the file's hash and the original's). Decrypted thumbnails and previews are decoded with bounds and downsampling, since the server can no longer screen them.
+- **Dedupe across members**: two members' uploads of the same photo are different files with the same tag. A `PHOTO_STORED` whose tag is in the local queue settles the row (and is not downloaded), as the plaintext hash did before.
+- **Room**: version 2 adds `photo_tag` and `original_sha256` to `pending_photos` and `photo_tag` and `key_epoch` to `received_photos` (`PhotonDatabase.MIGRATION_1_2`); unfinished plaintext uploads are prepared again.
+- **Not in this version**: security codes are computed (`Identity.securityCode`) but not shown in the UI.
 
 ## How it is put together
 
@@ -110,19 +125,22 @@ app/src/main/java/com/photon/app/
   PhotonApp.kt            Application and the hand-wired dependency graph (AppGraph)
   core/                   hashes, stream-id ordering, backoff, notifications, media permissions, cache dirs
   data/db/                Room: session_state, pending_photos, received_assets, hashes, received_photos (+ members, pause windows)
-  data/prefs/             Keystore-encrypted tokens (AndroidX Security), DataStore settings
+  data/prefs/             Keystore-encrypted tokens and E2EE keys (AndroidX Security), DataStore settings
   net/                    OkHttp clients, protobuf over HTTP, ErrorMapper/ApiException, RetryPolicy,
                           AuthInterceptor + single-flight TokenRefresher, PhotonApi (API_BASE), ImageApi (IMAGE_BASE),
                           ImageTransport (Cronet with OkHttp fallback)
+  e2ee/                   end-to-end encryption (e2ee.md): keys, sealing, the photo file, tags; no Android types
+  keys/                   KeyManager (key maintenance and rotation), KeySync (when it runs, what it wakes)
   auth/                   AuthService (Google via Credential Manager, dev login), GoogleIdTokens, sign-in rules;
                           BrowserOAuth + BrowserLogin (GitHub via Custom Tabs, PKCE)
   session/                SessionManager (create/join/leave/kick/end/rotate/pause, local teardown), invite parsing, purge
   sync/                   SyncService (specialUse foreground service + ContentObserver), MediaScanner, Eligibility,
                           ReconcileWorker, BootReceiver, WorkScheduler
-  upload/                 UploadWorker/Uploader (copy, hash, announce, resume, 3 parallel CRC32C chunks, complete loop),
-                          ChunkPlanner, Crc32c, UploadPreparer (GPS handling)
+  upload/                 UploadWorker/Uploader (copy, hash, encrypt, announce, resume, 3 parallel CRC32C chunks, complete
+                          loop), ChunkPlanner, Crc32c, UploadPreparer (GPS handling), PhotoPackager and Thumbnails
   events/                 EventConnection + WsSession (WebSocket), EventSync (/events and snapshot), close codes, CatchUpWorker
-  receive/                ReceivePipeline (dedupe, recall, expiry), ReceiveWorker/OriginalWorker, PhotoFetcher, GallerySaver
+  receive/                ReceivePipeline (dedupe, recall, expiry), ReceiveWorker/OriginalWorker, PhotoFetcher (decrypt,
+                          verify), GallerySaver
   push/                   FCM service (hint → CatchUpWorker), device registration
   ui/                     Compose screens, dialogs (consent, recall, report), QR
 ```
@@ -142,7 +160,7 @@ Choices worth knowing:
 
 ## Tests
 
-Unit tests (`app/src/test`, run here): error mapper and retry policy, chunk planning and throughput, eligibility filter, receive dedupe and policies, stream-id ordering, CRC32C and its header encoding, PKCE, WebSocket close codes plus a scripted WebSocket server, token refresh single-flight (also through the interceptor against a mock server), image API requests (chunks, `complete` 202/200/400/422, ranged resume), invite parsing, media permission states, unknown event types.
+Unit tests (`app/src/test`, run here): end-to-end encryption against the shared vectors `../tests/vectors/e2ee_v1.json`, read in place (public keys from private keys, the bundle, the box sealed with the fixed ephemeral key and opening it, the photo file from the fixed photo key and wrap nonce and its hash, the metadata JSON, section and prefix lengths, decrypting the file and both prefixes, the photo tag, the security code); round trips, tampering with every part of a box and a file, wrong and missing epoch keys, truncation, every `parse_header` rule, re-encryption, decrypting from disk, and the JSON reader; a cross-check that writes `app/build/e2ee-crosscheck.json` (a fixed and a random box, a fixed and a random file, and their inputs) for the Python reference; key maintenance and rotation against a scripted server with real crypto (sharing per epoch, opening boxes, ignoring bad ones and foreign tag keys, `EPOCH_TAKEN`, the last member rotating alone, a member key mismatch); the uploader's image checks; error mapper and retry policy, chunk planning and throughput, eligibility filter, receive dedupe and policies, stream-id ordering, CRC32C and its header encoding, PKCE, WebSocket close codes plus a scripted WebSocket server, token refresh single-flight (also through the interceptor against a mock server), image API requests (chunks, `complete` 202/200/400/422, ranged resume), invite parsing, media permission states, unknown event types.
 
 Instrumented tests (`app/src/androidTest`):
 
@@ -154,6 +172,7 @@ Instrumented tests (`app/src/androidTest`):
 | `BootReconcileTest` | `BOOT_COMPLETED` during a session schedules the reconcile scan and the catch-up |
 | `PartialAccessTest` | partial media access shows the prompt |
 | `ReceivePipelineTest` | dedupe, the WAITING rule, recall tombstones and snapshots against real Room |
+| `MigrationTest` | Room 1 → 2 (end-to-end encryption columns); unfinished plaintext uploads are prepared again |
 
 The end-to-end test in the plan (two emulators and the Python script client in one session) is manual for now: run the dev backend, two emulators with this app, and `tools/photon_cli.py listen`.
 
@@ -167,3 +186,4 @@ This project was built and unit-tested on a machine without an emulator image or
 - **Camera folder names** differ between manufacturers; the filter accepts anything under `DCIM/` except `Screenshots`. Check Pixel, Samsung and Xiaomi.
 - **The release App Link** needs the real domain, `assetlinks.json` with the release certificate, and a release signing config (none is set up).
 - **No end-to-end run against the backend**: the client was written against the plan and the shared proto; the backend was being built at the same time.
+- **End-to-end encryption** is verified by the JVM tests only: the shared vectors byte for byte, and the Kotlin output opened by the Python reference (`app/build/e2ee-crosscheck.json`). Not run on a device: Tink and AES-GCM under Conscrypt, the thumbnails and previews (`BitmapFactory`, WebP, EXIF orientation), the encrypted key store, key maintenance against the real orchestrator, rotation after a member leaves, and the Room migration (`MigrationTest` compiles but hasn't run). `UploadResumeTest` was updated for encrypted uploads (a real JPEG, a held epoch key) and compiles. HEIC and HEIF originals can only be thumbnailed where `BitmapFactory` decodes them (Android 9 and later); on Android 8 they are refused as `INVALID_IMAGE`.

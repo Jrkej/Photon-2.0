@@ -11,6 +11,11 @@ import com.photon.app.data.db.PhotonDatabase
 import com.photon.app.data.db.SessionState
 import com.photon.app.data.db.UploadState
 import com.photon.app.data.prefs.SettingsStore
+import com.photon.app.e2ee.Bundle
+import com.photon.app.e2ee.E2ee
+import com.photon.app.e2ee.E2eeException
+import com.photon.app.e2ee.Header
+import com.photon.app.keys.KeyManager
 import com.photon.app.net.ApiException
 import com.photon.app.net.CompleteOutcome
 import com.photon.app.net.ErrorCodes
@@ -34,6 +39,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl
 import java.io.File
+import java.io.FileInputStream
 import java.io.IOException
 import java.io.RandomAccessFile
 import java.util.concurrent.atomic.AtomicReference
@@ -47,9 +53,10 @@ sealed interface QueueResult {
 }
 
 /**
- * The upload queue (7.7): copy and hash, announce, resume, chunks, complete. Every step is
- * resumable: the row keeps its copy, hash, upload id and chunk size, so a run that is killed
- * part-way continues where the server says it stopped.
+ * The upload queue (7.7, e2ee.md 7): copy, strip GPS and hash; check the image, tag it and build the encrypted
+ * file; announce, resume, chunks, complete. Every step is resumable: the row keeps its encrypted file, hash,
+ * upload id and chunk size, so a run that is killed part-way continues where the server says it stopped, and a
+ * re-announce sends the same bytes.
  */
 class Uploader(
     private val context: Context,
@@ -58,6 +65,8 @@ class Uploader(
     private val imageApi: ImageApi,
     private val settings: SettingsStore,
     private val preparer: UploadPreparer,
+    private val packager: PhotoPackager,
+    private val keys: KeyManager,
     private val cache: MediaCache,
     private val throughput: ThroughputEstimator,
     private val sessions: () -> SessionManager,
@@ -78,6 +87,12 @@ class Uploader(
 
         /** Session gone, paused or signed out. */
         data object Stop : Step
+    }
+
+    /** A row whose file is encrypted for the current epoch ([epoch]), or the step that settles it instead. */
+    private sealed interface Current {
+        data class Ready(val row: PendingPhoto, val epoch: Int) : Current
+        data class Settled(val step: Step) : Current
     }
 
     private sealed interface Transfer {
@@ -121,9 +136,14 @@ class Uploader(
     private suspend fun process(s: SessionState, row: PendingPhoto): Step {
         var r = row
 
-        // 1. Copy and hash.
-        val copyPresent = r.copyPath?.let { File(it).exists() } == true
-        if (r.state == UploadState.PENDING || r.sha256 == null || !copyPresent) {
+        // 1. Copy, strip GPS and hash the original; then check it, tag it, make the thumbnail and preview and
+        //    build the encrypted file for the current epoch (e2ee.md 7 steps 1-5). Needs the current key first.
+        val built = r.copyPath?.let { File(it) }?.takeIf { it.exists() }
+        if (r.state == UploadState.PENDING || r.sha256 == null || r.photoTag == null || built == null) {
+            val bundle = when (val k = currentBundle(s, r)) {
+                is KeyCheck.Ready -> k.bundle
+                is KeyCheck.Settled -> return k.step
+            }
             val prepared = try {
                 preparer.prepare(r, settings.stripGpsNow())
             } catch (e: IOException) {
@@ -132,39 +152,73 @@ class Uploader(
             when (prepared) {
                 is Prepared.Skip -> return settle(r, UploadState.SKIPPED, prepared.reason)
                 is Prepared.Ready -> {
-                    // Echo layer 4: these bytes were received or uploaded before.
+                    // Echo layer 4: this original was received or shared before.
                     if (db.hashes().contains(prepared.sha256)) {
                         prepared.copy.delete()
-                        return settle(r.copy(sha256 = prepared.sha256), UploadState.SKIPPED, "known hash")
+                        return settle(r.copy(originalSha256 = prepared.sha256), UploadState.SKIPPED, "known hash")
                     }
-                    val sameBytes = prepared.sha256 == r.sha256
-                    r = r.copy(
-                        state = if (r.state == UploadState.PENDING) UploadState.HASHED else r.state,
-                        sha256 = prepared.sha256,
-                        sizeBytes = prepared.size,
-                        copyPath = prepared.copy.path,
-                        uploadId = if (sameBytes) r.uploadId else null,
-                        uploadUrl = if (sameBytes) r.uploadUrl else null,
-                        chunkSize = if (sameBytes) r.chunkSize else 0,
-                    )
-                    if (!save(r)) return Step.Next
+                    val packaged = try {
+                        packager.build(r, prepared.copy, prepared.sha256, bundle)
+                    } catch (e: IOException) {
+                        return Step.RetryLater
+                    } finally {
+                        prepared.copy.delete()
+                    }
+                    when (packaged) {
+                        is Packaged.Refused -> return settle(r.copy(originalSha256 = prepared.sha256), packaged.state, packaged.reason)
+                        is Packaged.Ready -> {
+                            r = r.copy(
+                                state = if (r.state == UploadState.PENDING) UploadState.HASHED else r.state,
+                                sha256 = packaged.sha256,
+                                sizeBytes = packaged.size,
+                                copyPath = packaged.file.path,
+                                photoTag = packaged.photoTag,
+                                originalSha256 = prepared.sha256,
+                                // A new file (a fresh photo key) is a new upload.
+                                uploadId = null,
+                                uploadUrl = null,
+                                chunkSize = 0,
+                                lastError = r.lastError.takeUnless { it == KEY_WAIT },
+                            )
+                            if (!save(r)) return Step.Next
+                        }
+                    }
                 }
             }
         }
 
-        // 2–5. Announce, then transfer; a superseded or expired upload is announced again.
-        repeat(MAX_ANNOUNCES_PER_RUN) {
+        // 2–5. Announce, then transfer; a superseded or expired upload is announced again. The key answers
+        // (e2ee.md 7) rotate or refresh the keys, rebuild the file and announce again.
+        var announces = 0
+        var keyRounds = 0
+        while (announces < MAX_ANNOUNCES_PER_RUN) {
+            val epoch = when (val c = ensureCurrentEpoch(s, r)) {
+                is Current.Ready -> {
+                    r = c.row
+                    c.epoch
+                }
+                is Current.Settled -> return c.step
+            }
+            announces++
             val announce = try {
                 api.announce(
                     AnnounceRequest(
                         sha256 = Hashes.bytes(r.sha256!!),
                         size = r.sizeBytes,
-                        mime = r.mime,
+                        mime = E2ee.MIME,
                         taken_at_ms = r.takenAtMs,
                         session_id = s.sessionId,
+                        photo_tag = Hashes.bytes(r.photoTag!!),
+                        key_epoch = epoch,
                     ),
                 )
             } catch (e: ApiException) {
+                if (isKeyAnswer(e)) {
+                    if (keyRounds++ >= MAX_KEY_ROUNDS) return defer(r, retry.backoffMs(r.attempts + 3), e.code)
+                    onKeyAnswer(s, r, e)?.let { return it }
+                    announces--
+                    continue
+                }
                 return onApiError(r, e)
             } catch (e: IOException) {
                 return Step.RetryLater
@@ -193,6 +247,124 @@ class Uploader(
             if (r.isFinal) return Step.Next
         }
         return defer(r, retry.backoffMs(r.attempts + 3), "announced too often")
+    }
+
+    private sealed interface KeyCheck {
+        data class Ready(val bundle: Bundle) : KeyCheck
+        data class Settled(val step: Step) : KeyCheck
+    }
+
+    /**
+     * The current epoch's bundle (e2ee.md 7 step 3). The first time this process sees the session, key
+     * maintenance runs first, so a newer epoch or a freshly shared key is known.
+     */
+    private suspend fun currentBundle(s: SessionState, r: PendingPhoto): KeyCheck {
+        if (keys.knownEpoch(s.sessionId) == null) {
+            try {
+                keys.maintain(s.sessionId)
+            } catch (e: IOException) {
+                return KeyCheck.Settled(Step.RetryLater)
+            } catch (e: ApiException) {
+                if (sessions().onSessionError(e)) return KeyCheck.Settled(Step.Stop)
+                // Otherwise go on with the keys held; the announce answers if they are stale.
+            }
+        }
+        val bundle = keys.currentBundle(s.sessionId) ?: return KeyCheck.Settled(waitForKey(r))
+        return KeyCheck.Ready(bundle)
+    }
+
+    /** Rebuilds a file encrypted for an older epoch than the current one, so the announce carries the current. */
+    private suspend fun ensureCurrentEpoch(s: SessionState, row: PendingPhoto): Current {
+        var r = row
+        val file = File(r.copyPath ?: return Current.Settled(prepareAgain(r)))
+        val fileEpoch = try {
+            readHeader(file).epoch
+        } catch (e: IOException) {
+            return Current.Settled(prepareAgain(r))
+        } catch (e: E2eeException) {
+            return Current.Settled(prepareAgain(r))
+        }
+        val bundle = when (val k = currentBundle(s, r)) {
+            is KeyCheck.Ready -> k.bundle
+            is KeyCheck.Settled -> return Current.Settled(k.step)
+        }
+        if (r.lastError == KEY_WAIT) r = r.copy(lastError = null)
+        if (bundle.epoch == fileEpoch) return Current.Ready(r, fileEpoch)
+
+        val (rebuilt, sha) = try {
+            packager.rebuild(file, keys.epochKeys(s.sessionId), bundle, r.mediaId)
+        } catch (e: E2eeException) {
+            // Our own file no longer decrypts (its epoch key is gone): build it again from the gallery.
+            return Current.Settled(prepareAgain(r))
+        } catch (e: IOException) {
+            return Current.Settled(Step.RetryLater)
+        }
+        r = r.copy(sha256 = sha, sizeBytes = rebuilt.length(), copyPath = rebuilt.path, uploadId = null, uploadUrl = null, chunkSize = 0)
+        if (!save(r)) return Current.Settled(Step.Next)
+        return Current.Ready(r, bundle.epoch)
+    }
+
+    private fun readHeader(file: File): Header = FileInputStream(file).use { input ->
+        val head = ByteArray(E2ee.HEADER_LEN)
+        var read = 0
+        while (read < head.size) {
+            val n = input.read(head, read, head.size - read)
+            if (n < 0) break
+            read += n
+        }
+        Header.parse(head.copyOf(read))
+    }
+
+    /** The encrypted file is gone or unreadable: start the row over (copy, strip, hash, build). */
+    private suspend fun prepareAgain(r: PendingPhoto): Step {
+        r.copyPath?.let { File(it).delete() }
+        save(r.copy(state = UploadState.PENDING, sha256 = null, copyPath = null, uploadId = null, uploadUrl = null, chunkSize = 0))
+        return Step.Next
+    }
+
+    private fun isKeyAnswer(e: ApiException) =
+        e.isCode(ErrorCodes.KEY_ROTATION_REQUIRED, ErrorCodes.KEY_EPOCH_STALE, ErrorCodes.KEY_REQUIRED)
+
+    /**
+     * e2ee.md 7: `KEY_ROTATION_REQUIRED` rotates (5.4, `EPOCH_TAKEN` included), `KEY_EPOCH_STALE` runs key
+     * maintenance; both return null so the loop rebuilds the file and announces again. `KEY_REQUIRED` waits for
+     * `KEY_SHARED`.
+     */
+    private suspend fun onKeyAnswer(s: SessionState, r: PendingPhoto, e: ApiException): Step? = try {
+        when (e.code) {
+            ErrorCodes.KEY_ROTATION_REQUIRED -> {
+                keys.rotate(s.sessionId)
+                null
+            }
+            ErrorCodes.KEY_EPOCH_STALE -> {
+                keys.maintain(s.sessionId)
+                null
+            }
+            else -> {
+                keys.maintain(s.sessionId)
+                waitForKey(r)
+            }
+        }
+    } catch (io: IOException) {
+        Step.RetryLater
+    } catch (api: ApiException) {
+        when {
+            sessions().onSessionError(api) -> Step.Stop
+            api.isCode(ErrorCodes.KEY_REQUIRED) -> waitForKey(r)
+            api.retryable || api.kind == ErrorKind.UNAVAILABLE -> Step.RetryLater
+            else -> defer(r, retry.backoffMs(r.attempts + 3), api.code)
+        }
+    }
+
+    /**
+     * No key for the current epoch on this phone yet (a newcomer): the row waits. Key maintenance makes it due
+     * again as soon as a member's app has shared the key ([com.photon.app.keys.KeySync]); until then it is
+     * retried with backoff.
+     */
+    private suspend fun waitForKey(r: PendingPhoto): Step {
+        val wait = minOf(KEY_WAIT_FIRST_MS shl r.attempts.coerceIn(0, 4), WAIT_MAX_MS)
+        save(r.copy(attempts = r.attempts + 1, nextAttemptMs = clock.nowMs() + wait, lastError = KEY_WAIT))
+        return Step.Next
     }
 
     private suspend fun transfer(row: PendingPhoto, url: HttpUrl, announce: AnnounceResponse): Transfer {
@@ -373,8 +545,10 @@ class Uploader(
     }
 
     private suspend fun synced(r: PendingPhoto): Step {
-        val sha = r.sha256 ?: return settle(r, UploadState.SYNCED, null)
-        db.hashes().insertIgnore(KnownHash(sha, KnownHash.UPLOADED, r.sessionId, clock.nowMs()))
+        val now = clock.nowMs()
+        // The file's hash for receive dedupe; the original's for echo layer 4.
+        r.sha256?.let { db.hashes().insertIgnore(KnownHash(it, KnownHash.UPLOADED, r.sessionId, now)) }
+        r.originalSha256?.let { db.hashes().insertIgnore(KnownHash(it, KnownHash.UPLOADED, r.sessionId, now)) }
         return settle(r, UploadState.SYNCED, null)
     }
 
@@ -416,6 +590,8 @@ class Uploader(
         attempts = r.attempts,
         nextAttemptMs = r.nextAttemptMs,
         lastError = r.lastError,
+        photoTag = r.photoTag,
+        originalSha256 = r.originalSha256,
     ) > 0
 
     /** Step 6: copies of rows in a final state, and strays, are deleted. */
@@ -432,6 +608,13 @@ class Uploader(
         const val PARALLEL_CHUNKS = 3
         const val CHUNK_RETRIES = 3
         const val MAX_ANNOUNCES_PER_RUN = 3
+
+        /** Rotations or key refreshes per row and run before backing off (e2ee.md 7). */
+        const val MAX_KEY_ROUNDS = 3
+
+        /** `last_error` of a row waiting for the current epoch's key; key maintenance makes those rows due. */
+        const val KEY_WAIT = "KEY_REQUIRED"
+        const val KEY_WAIT_FIRST_MS = 60_000L
         const val MAX_COMPLETE_WAITS = 30
         const val MAX_RESEND_ROUNDS = 3
         const val WAIT_FIRST_MS = 2 * 60_000L

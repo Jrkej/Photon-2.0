@@ -1,5 +1,6 @@
 package com.photon.app
 
+import android.graphics.Bitmap
 import android.net.Uri
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.photon.app.core.Backoff
@@ -10,9 +11,15 @@ import com.photon.app.data.db.PendingPhoto
 import com.photon.app.data.db.PhotonDatabase
 import com.photon.app.data.db.UploadState
 import com.photon.app.data.prefs.SettingsStore
+import com.photon.app.e2ee.Bundle
+import com.photon.app.e2ee.Identity
+import com.photon.app.keys.KeyManager
+import com.photon.app.keys.SessionKeyStore
 import com.photon.app.net.ImageApi
 import com.photon.app.net.PhotonApi
 import com.photon.app.net.RetryPolicy
+import com.photon.app.upload.ChunkPlan
+import com.photon.app.upload.PhotoPackager
 import com.photon.app.upload.QueueResult
 import com.photon.app.upload.ThroughputEstimator
 import com.photon.app.upload.UploadPreparer
@@ -112,8 +119,32 @@ class UploadResumeTest {
             }
         }
         server.start()
-        photo = File(context.cacheDir, "resume-src.jpg").apply { writeBytes(Random(7).nextBytes(4 * chunk + 1000)) }
+        // A real JPEG (the uploader checks and thumbnails it before encrypting): noise compresses badly, so
+        // the encrypted file is several 256 KiB chunks.
+        val random = Random(7)
+        val bitmap = Bitmap.createBitmap(1200, 1200, Bitmap.Config.ARGB_8888)
+        bitmap.setPixels(IntArray(1200 * 1200) { random.nextInt() or (0xFF shl 24) }, 0, 1200, 0, 0, 1200, 1200)
+        photo = File(context.cacheDir, "resume-src.jpg")
+        photo.outputStream().use { bitmap.compress(Bitmap.CompressFormat.JPEG, 95, it) }
+        bitmap.recycle()
+        assertTrue("the test needs at least five chunks", photo.length() > 4L * chunk)
     }
+
+    /** The session's epoch 1 is held and known, so no `GET /keys` is needed. */
+    private val keys: KeyManager by lazy {
+        val store = object : SessionKeyStore {
+            private val member = Identity.newPrivateKey()
+            private val held = mutableMapOf<Int, Bundle>()
+            override fun memberPrivateKey() = member
+            override fun bundles(sessionId: String) = held.toMap()
+            override fun addBundles(sessionId: String, bundles: Collection<Bundle>) = bundles.forEach { held.putIfAbsent(it.epoch, it) }
+            override fun clearSessions() = held.clear()
+        }
+        KeyManager(PhotonApi(server.url("/"), OkHttpClient(), OkHttpClient()), store) { "alice" }
+            .also { it.adoptCreatedSession("sess-1", Bundle.newSession()) }
+    }
+
+    private suspend fun chunkCount(): Int = ChunkPlan(db.pending().get(42)!!.sizeBytes, chunk).count
 
     @After
     fun tearDown() {
@@ -136,6 +167,8 @@ class UploadResumeTest {
             imageApi = ImageApi(server.url("/"), { client }, rewriteLocalUrls = false),
             settings = SettingsStore(context),
             preparer = UploadPreparer(context, cache),
+            packager = PhotoPackager(cache),
+            keys = keys,
             cache = cache,
             throughput = ThroughputEstimator(),
             sessions = { error("no session errors expected") },
@@ -180,9 +213,11 @@ class UploadResumeTest {
 
         assertTrue(result is QueueResult.Done)
         assertTrue("resent ${putsThisPhase.intersect(firstRun)}", putsThisPhase.intersect(firstRun).isEmpty())
-        assertEquals((0..4).toSet(), serverChunks.toSet())
+        assertEquals((0 until chunkCount()).toSet(), serverChunks.toSet())
         assertEquals(UploadState.SYNCED, db.pending().get(42)!!.state)
+        // The original's hash (echo layer 4) and the encrypted file's (receive dedupe) are both known now.
         assertTrue(db.hashes().contains(Hashes.sha256(photo)))
+        assertTrue(db.hashes().contains(db.pending().get(42)!!.sha256!!))
     }
 
     @Test

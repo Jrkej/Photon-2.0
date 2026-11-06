@@ -10,6 +10,9 @@ import com.photon.proto.CreateSessionRequest
 import com.photon.proto.DeviceRegistration
 import com.photon.proto.EventBatch
 import com.photon.proto.JoinRequest
+import com.photon.proto.KeyState
+import com.photon.proto.KeyUpload
+import com.photon.proto.KeyUploadResult
 import com.photon.proto.KickRequest
 import com.photon.proto.OAuthCallbackRequest
 import com.photon.proto.OAuthStartRequest
@@ -109,6 +112,16 @@ class PhotonApi(
             .build()
         return client.callProto(get(u), EventBatch.ADAPTER)
     }
+
+    // ---- end-to-end keys (e2ee.md 5)
+
+    /** `GET /v1/sessions/{sid}/keys`: the current epoch, every member's public key, and this user's sealed keys. */
+    suspend fun keys(sessionId: String): KeyState =
+        client.callProto(get(url("v1/sessions", sessionId, "keys")), KeyState.ADAPTER)
+
+    /** `POST /v1/sessions/{sid}/keys`: sealed keys for members who lack an epoch, or a new epoch (rotate). */
+    suspend fun uploadKeys(sessionId: String, upload: KeyUpload): KeyUploadResult =
+        client.callProto(post(url("v1/sessions", sessionId, "keys"), upload.toProtoBody()), KeyUploadResult.ADAPTER)
 
     // ---- photos
 

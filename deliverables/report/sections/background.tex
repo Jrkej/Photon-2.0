@@ -1,0 +1,77 @@
+\section{Networking Background and Design Rationale}\label{sec:background}
+
+This chapter introduces the networking concepts PHOTON is built on and explains, for each kind of traffic, why one protocol was chosen over the alternatives.
+
+\subsection{Networking Concepts Used in PHOTON}
+
+Table~\ref{tab:concepts} maps each concept to the standard that defines it and to the place where PHOTON uses it.
+
+\begin{table}[H]
+\centering
+\small\stripes
+\begin{tabularx}{\linewidth}{L{3.4cm}L{2.9cm}Y}
+\headrow \hd{Concept} & \hd{Standard} & \hd{Role in PHOTON}\\
+HTTP semantics, status codes, idempotent methods & RFC 9110 & Every REST call; the error contract maps each failure to a status code and a retry rule; chunk \texttt{PUT}s are idempotent \\
+HTTP/2 multiplexing & RFC 9113 & Several chunk uploads share one TCP connection; fallback when UDP is blocked \\
+QUIC and HTTP/3 & RFC 9000, 9114 & Data plane over UDP 443: no head-of-line blocking between streams, 1-RTT setup, connection migration across networks \\
+Alternative services (Alt-Svc) & RFC 7838 & The edge advertises \texttt{h3} on UDP 443; clients switch to it and fall back to HTTP/2 automatically \\
+TLS 1.3 & RFC 8446 & Every hop, including service-to-service calls and Redis \\
+WebSocket & RFC 6455 & Full-duplex event channel; binary protobuf frames; application close codes 4001--4410 \\
+OAuth 2.0 with PKCE & RFC 6749, 7636 & Sign-in through Google or GitHub without a client secret on the phone \\
+JSON Web Token, EdDSA & RFC 7519, 8037 & Access tokens and per-photo upload tokens, verified locally by each service \\
+CRC32C, SHA-256 & RFC 3720, FIPS 180-4 & Per-chunk integrity check; content address and end-to-end verification of each photo \\
+Reverse proxy, forwarded client address & RFC 7239 & Caddy terminates TLS; \texttt{X-Forwarded-For} is trusted only from known proxies, for per-IP rate limits \\
+Publish/subscribe over a durable log & Redis Streams & Gap-free event delivery with a resumable cursor \\
+Push notifications & FCM, APNs & Best-effort wake-up hint for phones without an open socket \\
+Port forwarding & Android \texttt{adb reverse} & A phone on USB reaches the laptop's development server through a tunnel \\
+\end{tabularx}
+\caption{Networking concepts, their standards, and their role in PHOTON}\label{tab:concepts}
+\end{table}
+
+\subsection{Choosing a Protocol for Each Plane}
+
+PHOTON separates its traffic into four planes, because each has different needs: small requests that must be answered, events that must reach the phone as soon as they happen, megabytes of photo data that must survive bad networks, and calls between services that must be authenticated. Table~\ref{tab:planes} lists the options considered for each plane.
+
+\begin{table}[H]
+\centering
+\small\stripes
+\begin{tabularx}{\linewidth}{L{2.2cm}L{3.9cm}L{3.1cm}Y}
+\headrow \hd{Plane} & \hd{Options considered} & \hd{Chosen} & \hd{Reason}\\
+Control (client to orchestrator) & Raw TCP protocol, gRPC, HTTP with JSON, HTTP with protobuf & HTTPS with protobuf bodies (\ep{application/x-protobuf}) & FastAPI serves HTTP, not raw sockets; status codes, headers, proxies and retries come for free; protobuf keeps bodies small \\
+Events (orchestrator to client) & Polling, long polling, Server-Sent Events, push only, WebSocket & WebSocket, plus FCM/APNs as a hint & One open socket delivers an event within a few milliseconds; push alone may be dropped, delayed or merged, so it only wakes the app \\
+Data (client and image server) & One large HTTP/1.1 \texttt{PUT}, raw TCP, HTTP/2, HTTP/3 & HTTP/3 over QUIC, HTTP/2 fallback, chunked and resumable & QUIC survives network changes and avoids head-of-line blocking; chunks bound the cost of a failure to 1\,MiB \\
+Internal (service to service) & Shared database writes, message queue, HTTPS & HTTPS with a service JWT (mTLS optional) & Only the image server may report a photo as stored; every report is authenticated and fenced \\
+\end{tabularx}
+\caption{Protocol options considered for each plane}\label{tab:planes}
+\end{table}
+
+\paragraph{Why not a hand-built TCP protocol?} An early version of the design used raw TCP between the phone and the server and a hand-written fallback from QUIC to TCP. Both were dropped. HTTP already defines request framing, status codes, authentication headers and caching rules, and every proxy, load balancer and monitoring tool understands it. Standard HTTP/3 clients (Cronet on Android, \texttt{URLSession} on iOS) already fall back to HTTP/2 when UDP is blocked. A custom protocol would have repeated all of this with more bugs.
+
+\paragraph{Why QUIC for photo data?} Over TCP, one lost segment stalls every HTTP/2 stream on the connection until it is retransmitted, so a lost packet in chunk 2 also delays chunks 3 and 4. QUIC delivers each stream independently. QUIC also identifies a connection by a connection ID rather than by the address and port pair, so when a phone moves from Wi-Fi to LTE its new address can continue the same connection, where TCP would have to start again with a new handshake.
+
+\subsection{Protocol Stack}
+
+Figure~\ref{fig:stack} shows the protocol stack of each plane. All planes share the same payload format (protobuf) and the same network layer; they differ in the application and transport protocols.
+
+\begin{figure}[H]
+\centering
+\resizebox{0.95\linewidth}{!}{\fig{stack}}
+\caption{Protocol stack of the four planes}\label{fig:stack}
+\end{figure}
+
+\subsection{Reliability Concepts}
+
+Four ideas from networking and distributed systems recur throughout the design.
+
+\begin{enumerate}
+  \item \textbf{At-least-once delivery plus idempotency gives an exactly-once effect.} The network may duplicate or drop messages, so the sender retries and the receiver makes a repeat harmless. PHOTON's chunk uploads, \texttt{complete} calls, reports and event deliveries are all built this way.
+  \item \textbf{Selective repeat.} As in the sliding-window protocols of the transport layer, the receiver tells the sender exactly which pieces arrived, and only the missing ones are sent again (Section~\ref{sec:alg-upload}).
+  \item \textbf{Leases.} A reservation that is not renewed expires on its own, so a client that disappears cannot hold a resource forever. Each upload holds a 15-minute lease that every chunk renews.
+  \item \textbf{Fencing tokens.} Every message that changes upload state names the \texttt{upload\_id} it belongs to, and the server applies it only if that id is still the live one, so a delayed message from an old attempt is rejected.
+\end{enumerate}
+
+Retries use exponential backoff with jitter, so that phones which lost the network together do not all retry at the same instant. The delay before attempt $k$ is
+\begin{equation}\label{eq:backoff}
+  d_k = \tfrac{1}{2}s_k + U\!\left(0,\ \tfrac{1}{2}s_k\right), \qquad s_k = \min\!\left(60\ \text{s},\ 1\ \text{s}\cdot 2^{k}\right),
+\end{equation}
+where $U(a,b)$ is a uniformly random value. A \texttt{Retry-After} from the server, when present, replaces $d_k$.

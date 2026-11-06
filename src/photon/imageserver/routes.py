@@ -1,9 +1,9 @@
-"""Image server HTTP: chunked upload, status, complete, downloads, and the orchestrator's delete."""
+"""Image server HTTP: chunked upload, status, complete, downloads, and the orchestrator's delete.
+Every stored file is end-to-end encrypted (e2ee.md); downloads serve it, or a prefix of it, as opaque bytes."""
 
 from __future__ import annotations
 
 import asyncio
-import os
 import re
 from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
@@ -16,13 +16,12 @@ from photon.common.errors import ApiError
 from photon.common.pb import photon_pb2 as pb
 from photon.common.proto import parse_body, proto_response
 from photon.imageserver.access import Access, upload_claims
-from photon.imageserver.decode import Decoder
 from photon.imageserver.pipeline import Pipeline
 from photon.imageserver.store import Store, check_sha, check_sid, read_json
 
 RANGE = re.compile(r"^bytes=(\d*)-(\d*)$")
 NO_STORE = {"Cache-Control": "private, no-store"}
-_preview_locks: dict[str, asyncio.Lock] = {}
+OPAQUE = "application/octet-stream"  # the server can't know the image type: it's inside the encrypted file
 
 
 def file_iter(path: Path, start: int, length: int) -> Iterator[bytes]:
@@ -37,8 +36,9 @@ def file_iter(path: Path, start: int, length: int) -> Iterator[bytes]:
             yield block
 
 
-def send_file(path: Path, media_type: str, etag: str, range_header: str | None) -> Response:
-    size = path.stat().st_size
+def send_file(path: Path, media_type: str, etag: str, range_header: str | None, limit: int | None = None) -> Response:
+    """Streams `path`, or its first `limit` bytes (the thumbnail and preview prefixes, e2ee.md 6.3)."""
+    size = path.stat().st_size if limit is None else min(limit, path.stat().st_size)
     headers = {**NO_STORE, "ETag": f'"{etag}"', "Accept-Ranges": "bytes"}
     if not range_header:
         return StreamingResponse(file_iter(path, 0, size), media_type=media_type,
@@ -68,13 +68,11 @@ def router(
     store: Store,
     access: Access,
     pipeline: Pipeline,
-    decoder: Decoder,
     upload_keys: jwtutil.KeySource,
     user: Callable[[Request], Awaitable[str]],
     orchestrator: Callable[[Request], Awaitable[str]],
 ) -> APIRouter:
     r = APIRouter()
-    settings = pipeline.settings
 
     @r.put("/v1/uploads/{upload_id}/chunks/{n}")
     async def put_chunk(upload_id: str, n: int, request: Request) -> Response:
@@ -125,24 +123,13 @@ def router(
         if now >= int(meta["expires_at_ms"]):
             raise ApiError("PHOTO_EXPIRED")  # the image server's own guard, whatever Redis says
         etag = f"{sha}-{size}"
-        if size == "thumb":
-            return send_file(d / "thumb.webp", "image/webp", etag, None)
-        if size == "preview":
-            preview = d / "preview.webp"
-            if not preview.exists():
-                lock = _preview_locks.setdefault(f"{sid}:{sha}", asyncio.Lock())
-                async with lock:
-                    if not preview.exists():
-                        tmp = d / f"preview.{os.getpid()}.webp"
-                        res = await decoder.run("preview", d / "original", tmp, str(meta["mime"]),
-                                                settings.preview_px)
-                        if not res.ok:
-                            tmp.unlink(missing_ok=True)
-                            raise ApiError("PROCESSING_FAILED", "Preview unavailable; use the thumbnail")
-                        os.replace(tmp, preview)
-                _preview_locks.pop(f"{sid}:{sha}", None)
-            return send_file(preview, "image/webp", etag, None)
-        return send_file(d / "original", str(meta["mime"]), etag, request.headers.get("range"))
+        if size == "full":
+            return send_file(d / "file", OPAQUE, etag, request.headers.get("range"))
+        # thumb and preview: the header, the metadata and every section up to the one asked for, so the receiver
+        # decrypts them without fetching the original (e2ee.md 6.3). The lengths come from the file's own header.
+        meta_len, thumb_len, preview_len, _ = (int(n) for n in meta["lengths"])
+        end = int(meta["header_len"]) + meta_len + thumb_len + (preview_len if size == "preview" else 0)
+        return send_file(d / "file", OPAQUE, etag, None, limit=end)
 
     @r.delete("/internal/v1/photos/{sid}/{sha}")
     async def delete(sid: str, sha: str, _: str = Depends(orchestrator)) -> Response:

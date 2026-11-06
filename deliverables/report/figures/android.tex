@@ -1,0 +1,25 @@
+% Android client: capture pipeline, upload, receive, echo prevention
+\begin{tikzpicture}[node distance=6mm]
+\node[ext, minimum width=24mm] (cam) at (0,0) {Camera app\\\scriptsize writes JPEG};
+\node[ext, minimum width=24mm] (ms) at (0,-1.7) {MediaStore};
+\node[blk, minimum width=34mm] (fg) at (4.3,-0.85) {Foreground service\\\scriptsize ContentObserver};
+\node[blk, minimum width=34mm] (tr) at (4.3,-2.55) {WorkManager trigger\\\scriptsize content URI, survives kill};
+\node[store, minimum width=26mm] (db) at (8.6,-1.7) {Room DB\\\scriptsize pending\_photos};
+\node[blk, minimum width=36mm, align=left, font=\scriptsize] (uw) at (12.7,-1.7) {\textbf{UploadWorker}\\SHA-256, strip GPS\\announce, 1 MiB chunks\\$\times 3$, retry + backoff\\complete};
+\draw[arr] (cam) -- (ms);
+\draw[arr] (ms.east) -- (fg.west);
+\draw[arr] (ms.east) -- (tr.west);
+\draw[arr] (fg.east) -- node[lbl, sloped]{enqueue only} (db.north west);
+\draw[arr] (tr.east) -- (db.south west);
+\draw[arr] (db) -- (uw);
+% receive side
+\node[edgeb, minimum width=34mm] (ws) at (4.3,-4.8) {WebSocket / FCM hint\\\scriptsize PhotoEvent};
+\node[blk, minimum width=34mm] (rw) at (8.6,-4.8) {ReceiveWorker\\\scriptsize thumb $\to$ preview $\to$ full};
+\node[cli, minimum width=36mm] (gal) at (12.7,-4.8) {Gallery: Pictures/PHOTON\\\scriptsize original only};
+\draw[arr] (ws) -- (rw);
+\draw[arr] (rw) -- (gal);
+\node[bad, font=\scriptsize, align=left, text width=118mm] (echo) at (6.9,-6.4) {\textbf{Echo prevention} (saving a received photo fires the same observer), checked in this order: 1.~ids in received\_assets, 2.~the PHOTON folder, 3.~owner package is the app, 4.~local hash set, 5.~server dedupe by SHA-256};
+\draw[dsh, draw=redtab] (gal.south) -- node[lbl]{fires observer} (gal.south|-echo.north);
+\draw[arr] (uw.north) -- ++(0,0.5) node[above, font=\scriptsize]{to image server};
+\draw[arr] (ws.west) ++(-1.2,0) node[left, font=\scriptsize, align=right]{from\\orchestrator} -- (ws.west);
+\end{tikzpicture}

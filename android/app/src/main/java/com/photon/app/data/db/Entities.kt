@@ -47,7 +47,7 @@ data class PauseWindow(
 )
 
 /** The upload queue. */
-@Entity(tableName = "pending_photos", indices = [Index("state"), Index("sha256")])
+@Entity(tableName = "pending_photos", indices = [Index("state"), Index("sha256"), Index("photo_tag")])
 data class PendingPhoto(
     @PrimaryKey @ColumnInfo(name = "media_id") val mediaId: Long,
     val uri: String,
@@ -55,7 +55,7 @@ data class PendingPhoto(
     @ColumnInfo(name = "taken_at_ms") val takenAtMs: Long,
     val mime: String,
     val state: String,
-    /** Lowercase hex of the copy that is uploaded. */
+    /** Lowercase hex of the encrypted file that is uploaded (e2ee.md 6.2): the photo's id on the server. */
     val sha256: String? = null,
     @ColumnInfo(name = "size_bytes") val sizeBytes: Long = 0,
     @ColumnInfo(name = "copy_path") val copyPath: String? = null,
@@ -66,6 +66,10 @@ data class PendingPhoto(
     @ColumnInfo(name = "next_attempt_ms") val nextAttemptMs: Long = 0,
     @ColumnInfo(name = "last_error") val lastError: String? = null,
     @ColumnInfo(name = "created_at_ms") val createdAtMs: Long,
+    /** Hex of the photo tag of the original (e2ee.md 6.2), the same for every member's upload of this photo. */
+    @ColumnInfo(name = "photo_tag") val photoTag: String? = null,
+    /** SHA-256 (hex) of the original inside the encrypted file: echo layer 4 for photos this device shared. */
+    @ColumnInfo(name = "original_sha256") val originalSha256: String? = null,
 ) {
     val isFinal: Boolean get() = state in UploadState.FINAL
 }
@@ -120,8 +124,13 @@ data class ReceivedPhoto(
     /** The gallery row of the saved original, set before it becomes visible. */
     @ColumnInfo(name = "media_id") val mediaId: Long? = null,
     @ColumnInfo(name = "received_at_ms") val receivedAtMs: Long,
+    /** Hex of the uploader's photo tag from the event, checked against the decrypted original. */
+    @ColumnInfo(name = "photo_tag") val photoTag: String? = null,
+    /** The epoch whose key encrypted the file, from the event; 0 when unknown (the header says it too). */
+    @ColumnInfo(name = "key_epoch", defaultValue = "0") val keyEpoch: Int = 0,
 ) {
-    val isTerminal: Boolean get() = state == ReceiveState.RECALLED || state == ReceiveState.EXPIRED
+    val isTerminal: Boolean
+        get() = state == ReceiveState.RECALLED || state == ReceiveState.EXPIRED || state == ReceiveState.FAILED
 }
 
 object ReceiveState {
@@ -130,4 +139,7 @@ object ReceiveState {
     const val SAVED = "SAVED"
     const val RECALLED = "RECALLED"
     const val EXPIRED = "EXPIRED"
+
+    /** Didn't decrypt, isn't the image its metadata names, or its original doesn't match its photo tag. */
+    const val FAILED = "FAILED"
 }

@@ -26,6 +26,7 @@ class UploadClaims:
     taken_at_ms: int
     uploader: str
     upload_id: str
+    key_epoch: int
 
 
 async def upload_claims(request: Request, keys: jwtutil.KeySource, upload_id: str) -> UploadClaims:
@@ -41,6 +42,7 @@ async def upload_claims(request: Request, keys: jwtutil.KeySource, upload_id: st
             taken_at_ms=int(c["taken_at_ms"]),
             uploader=str(c["uploader"]),
             upload_id=str(c["upload_id"]),
+            key_epoch=int(c["key_epoch"]),
         )
     except (KeyError, ValueError, TypeError) as e:
         raise ApiError("UNAUTHENTICATED", "Malformed upload token") from e

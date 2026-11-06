@@ -1,10 +1,13 @@
 package com.photon.app.receive
 
 import android.content.Context
+import android.util.Log
 import androidx.work.ListenableWorker
 import androidx.work.WorkerParameters
 import com.photon.app.AppGraph
 import com.photon.app.data.db.ReceiveState
+import com.photon.app.e2ee.E2eeException
+import com.photon.app.e2ee.MissingEpochKeyException
 import com.photon.app.graph
 import com.photon.app.net.ApiException
 import com.photon.app.net.ErrorCodes
@@ -23,7 +26,8 @@ class ReceiveWorker(context: Context, params: WorkerParameters) : PhotonWorker(c
             graph.pipeline.sweepExpired()
             return Result.success()
         }
-        return runCatchingDownload(graph, row.sessionId, sha, runAttemptCount) {
+        // A photo waiting for its epoch key is resumed by key maintenance (KeySync) once the key is here.
+        return runCatchingDownload(graph, row.sessionId, sha, runAttemptCount, resumedAfterKeys = row.thumbPath == null) {
             if (row.thumbPath == null) graph.fetcher.fetchThumb(row)
             val quality = graph.network.quality()
             if (row.previewPath == null && ReceivePolicy.fetchPreview(quality)) graph.fetcher.fetchPreview(row)
@@ -47,7 +51,7 @@ class OriginalWorker(context: Context, params: WorkerParameters) : PhotonWorker(
         val sha = inputData.getString(KEY_SHA256) ?: return Result.failure()
         val variant = inputData.getString(KEY_VARIANT) ?: return Result.failure()
         val row = graph.db.received().get(sha) ?: return Result.success()
-        val result = runCatchingDownload(graph, row.sessionId, sha, runAttemptCount) {
+        val result = runCatchingDownload(graph, row.sessionId, sha, runAttemptCount, resumedAfterKeys = false) {
             graph.fetcher.fetchAndSaveOriginal(sha)
         }
         if (result == Result.success()) {
@@ -65,15 +69,28 @@ class OriginalWorker(context: Context, params: WorkerParameters) : PhotonWorker(
     }
 }
 
-/** Shared error handling for download jobs, per the error contract. */
+/**
+ * Shared error handling for download jobs, per the error contract and e2ee.md 6.3: a file encrypted for an
+ * epoch this phone doesn't hold yet waits for key maintenance (it never fails for that); one that doesn't
+ * decrypt, or doesn't match its tag or type, fails and is not saved.
+ */
 internal suspend fun runCatchingDownload(
     graph: AppGraph,
     sessionId: String,
     sha256: String,
     attempt: Int,
+    /** True when key maintenance runs this photo again once the key arrives ([com.photon.app.keys.KeySync]). */
+    resumedAfterKeys: Boolean,
     block: suspend () -> Unit,
 ): ListenableWorker.Result = try {
     block()
+    ListenableWorker.Result.success()
+} catch (e: MissingEpochKeyException) {
+    Log.i("PHOTON", "photo $sha256 waits for the key of epoch ${e.epoch}")
+    graph.keySync.maintenanceNeeded()
+    if (resumedAfterKeys) ListenableWorker.Result.success() else ListenableWorker.Result.retry()
+} catch (e: E2eeException) {
+    graph.pipeline.markFailed(sessionId, sha256, e.message ?: "does not decrypt")
     ListenableWorker.Result.success()
 } catch (e: IOException) {
     ListenableWorker.Result.retry()

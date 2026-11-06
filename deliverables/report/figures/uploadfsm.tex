@@ -1,0 +1,20 @@
+% Image server upload states (persisted to disk before every reply)
+\begin{tikzpicture}[node distance=9mm]
+\node[blk, st] (r) {RECEIVING};
+\node[warn, st, right=of r] (v) {VERIFYING};
+\node[blk, st, right=of v] (vf) {VERIFIED};
+\node[blk, st, right=of vf] (rp) {REPORTING};
+\node[cli, st, right=of rp] (s) {STORED};
+\node[bad, st, below=11mm of v] (rj) {REJECTED\\\scriptsize 422};
+\node[ext, st, below=11mm of rp] (sp) {SUPERSEDED\\\scriptsize 409};
+\node[ext, st, below=11mm of s] (en) {ENDED\\\scriptsize 410};
+\draw[arr] (r) -- node[lblc, above]{complete} (v);
+\draw[arr] (v) -- node[lblc, above]{hash ok} (vf);
+\draw[arr] (vf) -- node[lblc, above]{thumb} (rp);
+\draw[arr] (rp) -- node[lblc, above]{200} (s);
+\draw[arr] (v) -- node[lblc, right]{mismatch,\\invalid} (rj);
+\draw[arr] (rp) -- (sp);
+\draw[arr] (rp) -- (en);
+\draw[arr] (r.north) to[out=120, in=60, looseness=4] node[lblc, above]{chunk $n$ (idempotent)} (r.north east);
+\draw[dsh] (vf.north) to[out=120, in=60, looseness=3] node[lblc, above]{503, retry} (vf.north east);
+\end{tikzpicture}

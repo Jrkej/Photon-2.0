@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Literal
 
@@ -17,6 +16,9 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="PHOTON_", env_file=".env", extra="ignore")
 
     env: Literal["dev", "test", "prod"] = "dev"
+    # The username-only dev login (never in prod). "local": only for requests made on this machine itself, not
+    # through a proxy or tunnel, so a dev stack reachable from the internet can still be signed into by the CLI.
+    dev_login: Literal["on", "local", "off"] = "on"
 
     # Stores
     redis_url: str = "redis://localhost:6379/0"
@@ -63,7 +65,6 @@ class Settings(BaseSettings):
     # Photos and uploads
     retention_ms: int = 30 * MINUTE_MS
     max_photo_bytes: int = 25 * MIB
-    max_pixels: int = 100_000_000
     session_quota_bytes: int = 1024 * MIB
     max_live_uploads_user: int = 3
     max_live_uploads_session: int = 20
@@ -80,16 +81,6 @@ class Settings(BaseSettings):
     final_state_keep_s: int = 3600
     orphan_age_s: int = 3600
     stale_tmp_s: int = 15 * 60
-    allowed_mimes: list[str] = ["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"]
-
-    # Image processing
-    decode_concurrency: int = max(1, os.cpu_count() or 1)
-    decode_mem_bytes: int = 1536 * MIB
-    decode_cpu_s: int = 20
-    decode_wall_s: float = 30.0
-    thumb_px: int = 320
-    preview_px: int = 1600
-    thumb_attempts: int = 3
 
     # Rate limits
     announce_per_minute: int = 20

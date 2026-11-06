@@ -1,6 +1,6 @@
 """The upload state machine, persisted in tmp/{upload_id}/state.json before every response.
 
-RECEIVING -> VERIFYING -> VERIFIED -> REPORTING -> STORED
+RECEIVING -> VERIFYING -> REPORTING -> STORED
 failures: REJECTED; orchestrator answers: SUPERSEDED (409), ENDED (410).
 """
 
@@ -12,13 +12,13 @@ import os
 import weakref
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from typing import Any
 
 from photon.common import clock
 from photon.imageserver.store import Store, read_json, write_json
 
-RECEIVING, VERIFYING, VERIFIED, REPORTING = "RECEIVING", "VERIFYING", "VERIFIED", "REPORTING"
+RECEIVING, VERIFYING, REPORTING = "RECEIVING", "VERIFYING", "REPORTING"
 STORED, REJECTED, SUPERSEDED, ENDED = "STORED", "REJECTED", "SUPERSEDED", "ENDED"
 FINAL = frozenset({STORED, REJECTED, SUPERSEDED, ENDED})
 
@@ -35,8 +35,8 @@ class UploadState:
     state: str = RECEIVING
     created_at: int = field(default_factory=clock.now_ms)
     updated_at: int = 0
-    thumb_attempts: int = 0
     lease_missing_since: int = 0
+    key_epoch: int = 0
     result: dict[str, Any] = field(default_factory=dict)
 
 
@@ -44,7 +44,8 @@ def load(store: Store, upload_id: str) -> UploadState | None:
     raw = read_json(store.upload_dir(upload_id) / "state.json")
     if raw is None:
         return None
-    return UploadState(**raw)
+    known = {f.name for f in fields(UploadState)}
+    return UploadState(**{k: v for k, v in raw.items() if k in known})
 
 
 def save(store: Store, st: UploadState) -> None:

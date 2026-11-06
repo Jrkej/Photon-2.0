@@ -1,9 +1,9 @@
-"""Phase 5: gap-free events across reconnects, resync, snapshot, WebSocket close codes, downloads."""
+"""Phase 5: gap-free events across reconnects, resync, snapshot, WebSocket close codes, downloads (of end-to-end
+encrypted files, e2ee.md 6.3)."""
 
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import random
 
@@ -15,10 +15,12 @@ from websockets.exceptions import ConnectionClosed
 from photon.client.api import ClientError, PhotonClient
 from photon.client.listener import Listener
 from photon.client.uploader import upload_bytes
-from photon.common import clock, jwtutil
+from photon.common import clock, e2ee, jwtutil
 from photon.common.pb import photon_pb2 as pb
 from photon.orchestrator import keys as K
-from tests.conftest import Login, Stack, eventually, jpeg
+from tests.conftest import Login, Stack, eventually, jpeg, share_keys
+
+GHOST_KEY = "00" * 32  # a member key for members joined straight through the function library
 
 
 @pytest_asyncio.fixture(loop_scope="session")
@@ -26,6 +28,7 @@ async def pair(login: Login) -> tuple[str, PhotonClient, PhotonClient]:
     host, member = await login("host"), await login("member")
     info = await host.create_session()
     await member.join(code=info.join_code)
+    await share_keys(info.session_id, host, member)
     return info.session_id, host, member
 
 
@@ -64,7 +67,8 @@ async def test_gap_free_delivery_across_reconnects(pair: tuple[str, PhotonClient
         keys = K.session_keys(sid)
         for i in range(600):
             uid = f"ghost{i % 5}"
-            await env.svc.fn.call("join", keys, sid, clock.now_ms(), env.settings.retention_ms, uid, 10**9)
+            await env.svc.fn.call("join", keys, sid, clock.now_ms(), env.settings.retention_ms, uid, 10**9,
+                                  GHOST_KEY)
             await env.svc.fn.call("leave", keys, sid, clock.now_ms(), env.settings.retention_ms, uid)
             produced += 2
             if i % 50 == 0:
@@ -106,7 +110,8 @@ async def test_trimmed_cursor_needs_resync(pair: tuple[str, PhotonClient, Photon
     sid, _host, member = pair
     old = (await member.snapshot(sid)).cursor
     clock.advance(env.settings.retention_ms + 3_600_000 + 60_000)
-    await env.svc.fn.call("join", K.session_keys(sid), sid, clock.now_ms(), env.settings.retention_ms, "late", 10**9)
+    await env.svc.fn.call("join", K.session_keys(sid), sid, clock.now_ms(), env.settings.retention_ms, "late", 10**9,
+                          GHOST_KEY)
     with pytest.raises(ClientError) as e:
         await member.events_since(sid, old)
     assert (e.value.status, e.value.code) == (410, "RESYNC_REQUIRED")
@@ -136,7 +141,7 @@ async def test_events_pagination(pair: tuple[str, PhotonClient, PhotonClient], e
     start = (await member.snapshot(sid)).cursor
     for i in range(7):
         await env.svc.fn.call("join", K.session_keys(sid), sid, clock.now_ms(), env.settings.retention_ms, f"p{i}",
-                              10**9)
+                              10**9, GHOST_KEY)
     seen, cursor = [], start
     while True:
         batch = await member.events_since(sid, cursor, limit=3)
@@ -152,8 +157,8 @@ async def test_photo_stored_between_snapshot_and_connect_arrives_once(
     sid, host, member = pair
     listener = Listener(member, sid)
     await listener.load_snapshot()
-    data = jpeg(1)
-    assert (await upload_bytes(host, sid, data, "image/jpeg", clock.now_ms())).outcome == "STORED"
+    res = await upload_bytes(host, sid, jpeg(1), "image/jpeg", clock.now_ms())
+    assert res.outcome == "STORED"
     listener.cursor = None  # force another snapshot that already contains the photo...
     await listener.load_snapshot()
     stop = asyncio.Event()
@@ -161,8 +166,9 @@ async def test_photo_stored_between_snapshot_and_connect_arrives_once(
     await asyncio.wait_for(listener.connected.wait(), 5)
     stop.set()
     await task
-    stored = [e for e in listener.events if e.sha256 == hashlib.sha256(data).digest()]
+    stored = [e for e in listener.events if e.sha256 == bytes.fromhex(res.sha256)]
     assert len(stored) == 1  # ...and the duplicate from the stream was dropped by hash
+    assert stored[0].photo_tag == res.photo_tag and stored[0].key_epoch == 1
 
 
 @pytest.mark.parametrize("case", ["bad_hello", "bad_token", "not_member"])
@@ -228,10 +234,10 @@ async def test_kick_and_end_close_sockets(login: Login, env: Stack) -> None:
 
 async def test_downloads(pair: tuple[str, PhotonClient, PhotonClient], env: Stack, login: Login) -> None:
     sid, host, member = pair
-    data = jpeg(3, (400, 300))
-    res = await upload_bytes(host, sid, data, "image/jpeg", clock.now_ms())
+    res = await upload_bytes(host, sid, jpeg(3, (2000, 1500)), "image/jpeg", clock.now_ms())
     assert res.outcome == "STORED"
-    h = hashlib.sha256(data).hexdigest()
+    h = res.sha256
+    data = (env.settings.storage_root / "photos" / sid / h / "file").read_bytes()  # the encrypted file
     stranger = await login("stranger")
     with pytest.raises(ClientError) as e:
         await stranger.download(sid, h, "thumb")
@@ -243,9 +249,17 @@ async def test_downloads(pair: tuple[str, PhotonClient, PhotonClient], env: Stac
     assert tail.content == data[-5:]
     bad = await member.download(sid, h, "full", f"bytes={len(data) + 10}-")
     assert bad.status_code == 416
-    preview = await member.download(sid, h, "preview")
-    assert preview.headers["content-type"] == "image/webp" and preview.headers["cache-control"] == "private, no-store"
-    assert (env.settings.storage_root / "photos" / sid / h / "preview.webp").exists()
+    full = await member.download(sid, h)
+    assert full.content == data and full.headers["content-type"] == "application/octet-stream"
+    # thumb and preview are byte prefixes of the same file: the server cuts them at the header's section lengths
+    header = e2ee.parse_header(data)
+    for size in ("thumb", "preview"):
+        prefix = await member.download(sid, h, size)
+        assert prefix.content == data[:header.prefix_len(size)]
+        assert prefix.headers["content-type"] == "application/octet-stream"
+        assert prefix.headers["cache-control"] == "private, no-store"
+    assert header.prefix_len("thumb") < header.prefix_len("preview") < len(data)
+    assert sorted(p.name for p in (env.settings.storage_root / "photos" / sid / h).iterdir()) == ["file", "meta.json"]
     with pytest.raises(ClientError) as e:
         await member.download(sid, "ab" * 32, "thumb")
     assert e.value.code == "PHOTO_NOT_FOUND"
@@ -254,9 +268,9 @@ async def test_downloads(pair: tuple[str, PhotonClient, PhotonClient], env: Stac
 async def test_image_server_enforces_expiry_even_if_redis_disagrees(
         pair: tuple[str, PhotonClient, PhotonClient], env: Stack) -> None:
     sid, host, member = pair
-    data = jpeg(4)
-    assert (await upload_bytes(host, sid, data, "image/jpeg", clock.now_ms())).outcome == "STORED"
-    h = hashlib.sha256(data).hexdigest()
+    res = await upload_bytes(host, sid, jpeg(4), "image/jpeg", clock.now_ms())
+    assert res.outcome == "STORED"
+    h = res.sha256
     entry = json.loads(await env.redis.hget(K.photos(sid), h))
     entry["expires_at"] = entry["expires_at"] + 10 * 3_600_000  # stale or tampered state
     await env.redis.hset(K.photos(sid), h, json.dumps(entry))
@@ -273,14 +287,16 @@ async def test_live_delivery(pair: tuple[str, PhotonClient, PhotonClient]) -> No
     await asyncio.wait_for(listener.connected.wait(), 5)
     shas = []
     for i in range(3):
-        data = jpeg(10 + i)
-        shas.append(hashlib.sha256(data).digest())
-        assert (await upload_bytes(host, sid, data, "image/jpeg", clock.now_ms())).outcome == "STORED"
+        res = await upload_bytes(host, sid, jpeg(10 + i), "image/jpeg", clock.now_ms())
+        assert res.outcome == "STORED"
+        shas.append(bytes.fromhex(res.sha256))
 
     async def all_arrived() -> bool:
         return all(s in listener.hashes for s in shas)
 
     await eventually(all_arrived)
+    for i, sha in enumerate(shas):  # the member decrypts what arrived
+        assert (await member.download_photo(sid, sha.hex())).original == jpeg(10 + i)
     await host.end(sid)
     await asyncio.wait_for(task, 5)
 
@@ -299,3 +315,27 @@ async def test_many_sockets_at_once(pair: tuple[str, PhotonClient, PhotonClient]
             return 1 if f.WhichOneof("f") == "ready_cursor" else 0
 
     assert sum(await asyncio.gather(*(one() for _ in range(160)))) == 160
+
+
+async def test_listener_shares_and_receives_keys(login: Login) -> None:
+    """Key maintenance by listeners alone (e2ee.md 5.3): the host's listener seals for a newcomer on MEMBER_JOINED,
+    and the newcomer's listener opens its box on KEY_SHARED, with no explicit sync by either."""
+    host, bob = await login("host"), await login("bob")
+    info = await host.create_session()
+    sid = info.session_id
+    lh = Listener(host, sid)
+    th = asyncio.create_task(lh.run())
+    await asyncio.wait_for(lh.connected.wait(), 5)
+    await bob.join(code=info.join_code)
+    lb = Listener(bob, sid)
+    tb = asyncio.create_task(lb.run())
+
+    async def bob_has_key() -> bool:
+        return bob.keys.has(sid, 1)
+
+    await eventually(bob_has_key)
+    assert any(e.type == pb.PhotoEvent.KEY_SHARED and e.member_id == bob.uid for e in lh.events)
+    res = await upload_bytes(bob, sid, jpeg(30), "image/jpeg", clock.now_ms())
+    assert res.outcome == "STORED"
+    await host.end(sid)
+    await asyncio.wait_for(asyncio.gather(th, tb), 5)

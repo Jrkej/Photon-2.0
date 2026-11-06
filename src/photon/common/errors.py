@@ -17,6 +17,10 @@ CONTRACT: dict[str, tuple[int, bool]] = {
     "ALREADY_IN_SESSION": (409, False),
     "UPLOAD_SUPERSEDED": (409, False),
     "UPLOAD_FINALIZED": (409, False),
+    "KEY_ROTATION_REQUIRED": (409, False),  # e2ee.md 5.4: a member left; start a new key epoch, then re-announce
+    "KEY_EPOCH_STALE": (409, False),  # the file was encrypted for an old epoch; fetch keys and rebuild it
+    "EPOCH_TAKEN": (409, False),  # another member started this epoch first; fetch its key instead
+    "KEY_REQUIRED": (403, False),  # no key for the current epoch yet; wait for KEY_SHARED
     "SESSION_ENDED": (410, False),
     "PHOTO_EXPIRED": (410, False),
     "PHOTO_RECALLED": (410, False),
@@ -40,6 +44,7 @@ FUNCTION_ERRORS: dict[str, tuple[str, str]] = {
     "NOT_HOST": ("FORBIDDEN", "Only the host can do this"),
     "KICKED": ("FORBIDDEN", "You were removed from this session"),
     "CONFLICT": ("BUSY", "Conflict, try again"),
+    "KEYS_INCOMPLETE": ("INVALID_REQUEST", "A new key epoch needs a sealed key for every other member"),
 }
 
 DEFAULT_RETRY_AFTER: dict[str, int] = {

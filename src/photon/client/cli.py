@@ -5,6 +5,10 @@
     photon-cli --profile bob join ABCD2345
     photon-cli --profile alice upload IMG_0001.jpg
     photon-cli --profile bob listen --save-dir ./received
+    photon-cli --profile bob keys                    # security codes, held epochs
+
+Photos are end-to-end encrypted (e2ee.md): each profile keeps its identity key and session keys in
+$PHOTON_HOME/<profile>.keys.json (mode 600), and the server stores only encrypted files.
 """
 
 from __future__ import annotations
@@ -15,12 +19,15 @@ import json
 import mimetypes
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
 from photon.client.api import ClientError, PhotonClient
+from photon.client.keyring import Keyring
 from photon.client.listener import Listener
 from photon.client.uploader import upload_bytes
+from photon.common import e2ee
 from photon.common.pb import photon_pb2 as pb
 
 HOME = Path(os.environ.get("PHOTON_HOME", Path.home() / ".photon"))
@@ -59,11 +66,39 @@ def describe(ev: pb.PhotoEvent) -> str:
     kind = pb.PhotoEvent.Type.Name(ev.type)
     if ev.sha256:
         return f"{ev.event_id or '(snapshot)'} {kind} {ev.sha256.hex()[:16]} by {ev.uploader_id} ({ev.size} B)"
+    if ev.type in (pb.PhotoEvent.KEY_SHARED, pb.PhotoEvent.KEY_ROTATED):
+        return f"{ev.event_id} {kind} {ev.member_id} epoch {ev.key_epoch}"
     return f"{ev.event_id} {kind} {ev.member_id}"
 
 
+EXT = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "image/heic": ".heic", "image/heif": ".heif"}
+
+
+def pick(photo: e2ee.Photo, size: str) -> tuple[bytes, str]:
+    """The decrypted bytes for `size`, and a file extension for them."""
+    if size == "thumb" and photo.thumb:
+        return photo.thumb, ".webp"
+    if size == "preview" and photo.preview:
+        return photo.preview, ".webp"
+    return photo.original or b"", EXT.get(str(photo.meta.get("mime")), ".bin")
+
+
+async def wait_for_key(c: PhotonClient, sid: str, seconds: float) -> None:
+    deadline = time.monotonic() + seconds
+    while True:
+        state = await c.sync_keys(sid)
+        if c.keys.has(sid, state.epoch):
+            print(f"key      epoch {state.epoch} received")
+            return
+        if time.monotonic() >= deadline:
+            print("key      waiting for a member to share the session key (run `keys` or `listen` later)")
+            return
+        await asyncio.sleep(1.0)
+
+
 async def run(args: argparse.Namespace) -> int:
-    client = PhotonClient(args.api, args.image, token_file=HOME / f"{args.profile}.json")
+    client = PhotonClient(args.api, args.image, token_file=HOME / f"{args.profile}.json",
+                          keyring=Keyring(HOME / f"{args.profile}.keys.json"))
     try:
         return await dispatch(client, args)
     except ClientError as e:
@@ -91,6 +126,15 @@ async def dispatch(c: PhotonClient, args: argparse.Namespace) -> int:
                       else c.join(code=target))
         save_state(args.profile, sid=info.session_id)
         show(info)
+        await wait_for_key(c, info.session_id, args.wait)
+    elif cmd == "keys":
+        sid = current_sid(args)
+        state = await c.sync_keys(sid)
+        held = sorted(c.keys.bundles(sid))
+        print(f"you      {c.uid}  {e2ee.security_code(c.keys.member_key)}\nepoch    {state.epoch}"
+              f"{'  (rotation required)' if state.rotation_required else ''}\nheld     {held or 'none yet'}")
+        for m in state.members:
+            print(f"member   {m.member_id}  {e2ee.security_code(m.member_key)}  epoch {m.key_epoch}")
     elif cmd == "info":
         show(await c.session(current_sid(args)))
     elif cmd == "leave":
@@ -120,13 +164,33 @@ async def dispatch(c: PhotonClient, args: argparse.Namespace) -> int:
         if save_dir:
             save_dir.mkdir(parents=True, exist_ok=True)
 
+        waiting: list[pb.PhotoEvent] = []  # photos that arrived before this member had their epoch's key
+
+        async def save(ev: pb.PhotoEvent) -> None:
+            assert save_dir is not None
+            try:
+                photo = await c.download_photo(sid, ev.sha256.hex(), args.size, ev.photo_tag)
+            except (e2ee.E2eeError, ClientError) as e:
+                if not c.keys.has(sid, ev.key_epoch):
+                    print(f"  waiting for the epoch {ev.key_epoch} key", flush=True)
+                    waiting.append(ev)
+                else:
+                    print(f"  not saved: {e}", flush=True)
+                return
+            data, ext = pick(photo, args.size)
+            (save_dir / f"{ev.sha256.hex()[:16]}{ext}").write_bytes(data)
+
         async def on_event(ev: pb.PhotoEvent) -> None:
             print(describe(ev), flush=True)
-            if save_dir and ev.type == pb.PhotoEvent.PHOTO_STORED and ev.uploader_id != c.uid:
-                resp = await c.download(sid, ev.sha256.hex(), args.size)
-                ext = ".webp" if args.size != "full" else (mimetypes.guess_extension(
-                    resp.headers.get("content-type", "")) or ".bin")
-                (save_dir / f"{ev.sha256.hex()[:16]}{ext}").write_bytes(resp.content)
+            if not save_dir:
+                return
+            if ev.type == pb.PhotoEvent.PHOTO_STORED and ev.uploader_id != c.uid:
+                await save(ev)
+            elif ev.type in (pb.PhotoEvent.KEY_SHARED, pb.PhotoEvent.KEY_ROTATED) and waiting:
+                ready = [w for w in waiting if c.keys.has(sid, w.key_epoch)]
+                for w in ready:
+                    waiting.remove(w)
+                    await save(w)
 
         why = await Listener(c, sid, on_event).run()
         print(f"stopped: {why}")
@@ -149,8 +213,16 @@ async def dispatch(c: PhotonClient, args: argparse.Namespace) -> int:
     elif cmd == "report":
         await c.report(current_sid(args), args.sha, args.reason)
     elif cmd == "download":
-        resp = await c.download(current_sid(args), args.sha, args.size)
-        Path(args.output or f"{args.sha[:16]}").write_bytes(resp.content)
+        sid = current_sid(args)
+        if args.raw:
+            data, ext = (await c.download(sid, args.sha, args.size)).content, ".phe"
+        else:
+            try:
+                data, ext = pick(await c.download_photo(sid, args.sha, args.size), args.size)
+            except e2ee.E2eeError as e:
+                print(f"error: {e}", file=sys.stderr)
+                return 1
+        Path(args.output or f"{args.sha[:16]}{ext}").write_bytes(data)
     elif cmd == "device":
         await c.register_device(args.platform, args.token)
     return 0
@@ -166,8 +238,10 @@ def parser() -> argparse.ArgumentParser:
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("login").add_argument("--user", help="dev username (default: the profile name)")
     sub.add_parser("create").add_argument("--max-members", type=int, default=0)
-    sub.add_parser("join").add_argument("code_or_link")
-    for name in ("info", "leave", "end", "rotate", "snapshot"):
+    jn = sub.add_parser("join")
+    jn.add_argument("code_or_link")
+    jn.add_argument("--wait", type=float, default=15.0, help="seconds to wait for a member to share the key")
+    for name in ("info", "leave", "end", "rotate", "snapshot", "keys"):
         sub.add_parser(name)
     sub.add_parser("kick").add_argument("member_id")
     up = sub.add_parser("upload")
@@ -185,6 +259,7 @@ def parser() -> argparse.ArgumentParser:
     dl.add_argument("sha")
     dl.add_argument("--size", choices=["thumb", "preview", "full"], default="full")
     dl.add_argument("-o", "--output")
+    dl.add_argument("--raw", action="store_true", help="save the encrypted file as served")
     dv = sub.add_parser("device")
     dv.add_argument("--platform", choices=["android", "ios"], required=True)
     dv.add_argument("--token", required=True)

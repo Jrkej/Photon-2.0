@@ -72,6 +72,8 @@
     <string name="session_ended_message">The session has ended.</string>
     <string name="session_kicked_message">You are no longer a member of that session.</string>
     <string name="session_left_message">You left the session.</string>
+    <string name="key_wait_title">Waiting for a member to share the key</string>
+    <string name="key_wait_body">Photos are end-to-end encrypted. Until another member\'s app shares the session key with this phone, which happens by itself when one of them is online, your photos wait and received ones can\'t be opened.</string>
 
     <!-- Recall (7.11). The wording is reviewed against Design.md "What recall does and does not do". -->
     <string name="recall_title">Recall this photo?</string>

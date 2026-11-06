@@ -5,9 +5,9 @@
     "memory": "15 GB",
     "python": "3.12.3",
     "redis": "7.2.4",
-    "os": "Linux-7.0.0-38-generic-x86_64-with-glibc2.39"
+    "os": "Linux-7.0.0-42-generic-x86_64-with-glibc2.39"
   },
-  "started": 1793620602.383264,
+  "started": 1793976660.848568,
   "sections": [
     {
       "name": "1. Lua state transitions (Redis functions)",
@@ -15,167 +15,199 @@
         {
           "function": "join",
           "n": 9,
-          "p50_ms": 0.07027599895081948,
-          "p95_ms": 0.1173511998786125,
-          "p99_ms": 0.1358238399552647,
-          "mean_ms": 0.07840977761790985,
-          "max_ms": 0.14044199997442774
+          "p50_ms": 0.6106020009610802,
+          "p95_ms": 0.6866890002129367,
+          "p99_ms": 0.6895161998545518,
+          "mean_ms": 0.5824253336565258,
+          "max_ms": 0.6902229997649556
+        },
+        {
+          "function": "put_keys (share with one member)",
+          "n": 9,
+          "p50_ms": 0.6023440000717528,
+          "p95_ms": 0.6819586003985023,
+          "p99_ms": 0.6852629206696292,
+          "mean_ms": 0.5978724447130743,
+          "max_ms": 0.686089000737411
+        },
+        {
+          "function": "key_state (10 members)",
+          "n": 200,
+          "p50_ms": 0.6950420001885504,
+          "p95_ms": 1.0516263497265754,
+          "p99_ms": 1.1719744511356105,
+          "mean_ms": 0.7201499800703459,
+          "max_ms": 1.3981030006107176
         },
         {
           "function": "announce (new photo)",
           "n": 1000,
-          "p50_ms": 0.07702499988226919,
-          "p95_ms": 0.17226605014002414,
-          "p99_ms": 0.25758812953426946,
-          "mean_ms": 0.09180484998069005,
-          "max_ms": 0.34107499959645793
+          "p50_ms": 0.6559520006703679,
+          "p95_ms": 0.8244979497249005,
+          "p99_ms": 0.9015223298229103,
+          "mean_ms": 0.6325927060024696,
+          "max_ms": 1.0182299993175548
         },
         {
           "function": "report_stored (+ event)",
           "n": 1000,
-          "p50_ms": 0.07333550001931144,
-          "p95_ms": 0.1680374497482262,
-          "p99_ms": 0.2448904699849663,
-          "mean_ms": 0.08629595399725076,
-          "max_ms": 0.3097339995292714
+          "p50_ms": 0.6219599999894854,
+          "p95_ms": 0.7953204494697275,
+          "p99_ms": 0.8709247917067842,
+          "mean_ms": 0.5952846260152,
+          "max_ms": 0.9751630004757317
         },
         {
-          "function": "announce (duplicate)",
+          "function": "announce (duplicate file)",
           "n": 1000,
-          "p50_ms": 0.08169599914253922,
-          "p95_ms": 0.13485924991982756,
-          "p99_ms": 0.22238562984057353,
-          "mean_ms": 0.0853384020338126,
-          "max_ms": 0.3988089993072208
+          "p50_ms": 0.535056500666542,
+          "p95_ms": 0.7795030502165899,
+          "p99_ms": 0.8835288298178057,
+          "mean_ms": 0.524732892994507,
+          "max_ms": 1.6223710008489434
+        },
+        {
+          "function": "announce (same photo, another file: tag dedupe)",
+          "n": 1000,
+          "p50_ms": 0.4993844995624386,
+          "p95_ms": 0.7360079492173099,
+          "p99_ms": 0.8340550303182681,
+          "mean_ms": 0.4844145290207962,
+          "max_ms": 0.9395109991601203
         },
         {
           "function": "download_check",
           "n": 1000,
-          "p50_ms": 0.06541200036735972,
-          "p95_ms": 0.14649070062660025,
-          "p99_ms": 0.28323004942649277,
-          "mean_ms": 0.07993328600059613,
-          "max_ms": 0.36539500069920905
+          "p50_ms": 0.3972595004597679,
+          "p95_ms": 0.6576811495506263,
+          "p99_ms": 0.7330752600319101,
+          "mean_ms": 0.41331717802313506,
+          "max_ms": 0.9771320001163986
         },
         {
           "function": "events_since (500 events)",
           "n": 50,
-          "p50_ms": 14.392070000212698,
-          "p95_ms": 15.27356429987776,
-          "p99_ms": 32.06676840969515,
-          "mean_ms": 15.109068779893278,
-          "max_ms": 47.41699399892241
+          "p50_ms": 28.21540199965966,
+          "p95_ms": 57.3960979007097,
+          "p99_ms": 75.53155574969418,
+          "mean_ms": 34.849857359913585,
+          "max_ms": 89.59148099893355
         },
         {
           "function": "snapshot (1000 stored photos)",
           "n": 30,
-          "p50_ms": 10.910100499131659,
-          "p95_ms": 14.606800249839583,
-          "p99_ms": 18.835059819575694,
-          "mean_ms": 11.447230833437061,
-          "max_ms": 19.870313999490463
+          "p50_ms": 41.380486500202096,
+          "p95_ms": 46.153766899806214,
+          "p99_ms": 55.21392636046586,
+          "mean_ms": 35.94769726648034,
+          "max_ms": 58.56981100077974
         }
       ],
-      "note": "Throughput with 64 requests in flight from one Python process: 14,038 download_check/s. Redis runs each function atomically on one core; the client side is usually the limit."
+      "note": "Throughput with 64 requests in flight from one Python process: 11,654 download_check/s. Redis runs each function atomically on one core; the client side is usually the limit."
     },
     {
       "name": "2. Tokens and checksums (one core)",
       "rows": [
         {
           "operation": "sign access JWT (Ed25519)",
-          "rate": "34,230/s"
+          "rate": "29,211/s"
         },
         {
           "operation": "verify access JWT (every request)",
-          "rate": "9,842/s"
+          "rate": "7,694/s"
         },
         {
           "operation": "SHA-256 (upload verification)",
-          "rate": "1,831 MB/s"
+          "rate": "1,154 MB/s"
         },
         {
           "operation": "CRC32C (every chunk)",
-          "rate": "11,403 MB/s"
+          "rate": "7,286 MB/s"
         }
       ],
       "note": ""
     },
     {
-      "name": "3. Image validation and thumbnails (sandboxed subprocess, median of 3)",
+      "name": "3. End-to-end encryption on the device (one core, median of 3)",
       "rows": [
-        {
-          "image": "tiny JPEG 64\u00d748 (process overhead)",
-          "size": "0.0 MB",
-          "validate_ms": 47.61728900120943,
-          "thumb_ms": 64.01131900020118,
-          "preview_ms": 72.83942600042792
-        },
         {
           "image": "JPEG 1600\u00d71200",
           "size": "0.4 MB",
-          "validate_ms": 59.37679999988177,
-          "thumb_ms": 89.31600199866807,
-          "preview_ms": 203.0360609987838
+          "thumb+preview_ms": 21.797196999614243,
+          "encrypt_ms": 0.18778499907057267,
+          "tag_ms": 0.26600699857226573,
+          "decrypt_full_ms": 0.14121599997451995,
+          "decrypt_thumb_ms": 0.014695000572828576,
+          "thumb prefix": "2 kB",
+          "overhead": "219 B"
         },
         {
           "image": "JPEG 4032\u00d73024 (12 MP)",
           "size": "2.6 MB",
-          "validate_ms": 96.80036200006725,
-          "thumb_ms": 151.1775300004956,
-          "preview_ms": 325.10565300071903
+          "thumb+preview_ms": 324.98645200030296,
+          "encrypt_ms": 1.1689989987644367,
+          "tag_ms": 1.9571770008042222,
+          "decrypt_full_ms": 0.9646609996707411,
+          "decrypt_thumb_ms": 0.016119000065373257,
+          "thumb prefix": "2 kB",
+          "overhead": "219 B"
         },
         {
           "image": "HEIC 4032\u00d73024 (12 MP)",
           "size": "5.5 MB",
-          "validate_ms": 573.8099219997821,
-          "thumb_ms": 625.3030999996554,
-          "preview_ms": 800.564437000503
+          "thumb+preview_ms": 1025.1998820003791,
+          "encrypt_ms": 2.0000189997517737,
+          "tag_ms": 3.005343000040739,
+          "decrypt_full_ms": 1.8719169984251494,
+          "decrypt_thumb_ms": 0.011910000466741621,
+          "thumb prefix": "2 kB",
+          "overhead": "219 B"
         }
       ],
-      "note": "validate + thumb run on every upload's complete; preview runs once, on the first preview download. A 12 MP photo costs about validate + thumb of CPU on the image server."
+      "note": "thumb+preview is the image work the server used to do; it now runs on the uploader's phone, before AES-256-GCM. Receivers decrypt only the prefix they download. Sealing a session key for one member (X25519 + HKDF + AES-GCM): 15,637/s; opening one: 25,708/s. The image server's only per-upload check, parsing the header: 607,316/s."
     },
     {
       "name": "4. Announce over HTTP (JWT check, protobuf, Lua, upload-token signing)",
       "rows": [
         {
           "concurrent clients": 1,
-          "requests/s": 545.319151632818,
+          "requests/s": 184.31979852012228,
           "n": 1500,
-          "p50_ms": 1.607459500519326,
-          "p95_ms": 1.974371299093036,
-          "p99_ms": 2.613830810587387,
-          "mean_ms": 1.6606379153236048,
-          "max_ms": 4.083395999259665
+          "p50_ms": 5.331716500222683,
+          "p95_ms": 7.619386399346695,
+          "p99_ms": 8.412825040486496,
+          "mean_ms": 4.827605167340759,
+          "max_ms": 10.990880999088404
         },
         {
           "concurrent clients": 16,
-          "requests/s": 695.8118859996551,
+          "requests/s": 557.3542482532473,
           "n": 1488,
-          "p50_ms": 18.866529499973694,
-          "p95_ms": 19.84617634989263,
-          "p99_ms": 29.580636710179537,
-          "mean_ms": 19.16393186086078,
-          "max_ms": 57.47328899997228
+          "p50_ms": 22.105560000454716,
+          "p95_ms": 26.819438048823955,
+          "p99_ms": 70.19687425012313,
+          "mean_ms": 23.95972736023337,
+          "max_ms": 87.15239500088501
         },
         {
           "concurrent clients": 64,
-          "requests/s": 703.915855979965,
+          "requests/s": 540.83002898892,
           "n": 1472,
-          "p50_ms": 72.02829300058511,
-          "p95_ms": 114.9742779501139,
-          "p99_ms": 151.728518370237,
-          "mean_ms": 75.48228470312655,
-          "max_ms": 152.68182599902502
+          "p50_ms": 91.9505570000183,
+          "p95_ms": 165.00652419999824,
+          "p99_ms": 219.36829989008402,
+          "mean_ms": 100.99762640691739,
+          "max_ms": 220.74451499975112
         },
         {
           "concurrent clients": "16 (duplicate)",
-          "requests/s": 407.55335765865584,
+          "requests/s": 278.37957007161174,
           "n": 1500,
-          "p50_ms": 32.878773000447836,
-          "p95_ms": 67.7547161010807,
-          "p99_ms": 91.71117749030597,
-          "mean_ms": 38.319026558661186,
-          "max_ms": 1120.7072870001866
+          "p50_ms": 46.462318498925015,
+          "p95_ms": 145.11047145142584,
+          "p99_ms": 203.0614851998688,
+          "mean_ms": 56.19043479800166,
+          "max_ms": 290.6574409989844
         }
       ],
       "note": "One uvicorn worker per service, all in one Python process with the client: the services and the load generator share the same event loop and CPU."
@@ -186,41 +218,45 @@
         {
           "photo": "1600\u00d71200",
           "size": "0.4 MB",
-          "announce_ms": 2.5614719997975044,
-          "chunks_ms": 7.671432998904493,
-          "chunk MB/s": 55.04069449088553,
-          "complete_ms": 168.83828199934214,
-          "total_ms": 183.44021499979135
+          "encrypt_ms": 29.08577899870579,
+          "announce_ms": 4.262792001100024,
+          "chunks_ms": 10.417089000839042,
+          "chunk MB/s": 40.52254905050729,
+          "complete_ms": 21.658907999153598,
+          "total_ms": 42.68197700002929
         },
         {
           "photo": "3000\u00d72250",
           "size": "1.5 MB",
-          "announce_ms": 2.949704999991809,
-          "chunks_ms": 11.35391800016805,
-          "chunk MB/s": 128.86221302446825,
-          "complete_ms": 215.55918999911228,
-          "total_ms": 229.8310650003259
+          "encrypt_ms": 237.53439000029175,
+          "announce_ms": 3.2643819995428203,
+          "chunks_ms": 15.09183599955577,
+          "chunk MB/s": 96.91080661379111,
+          "complete_ms": 23.40777500103286,
+          "total_ms": 43.22024000066449
         },
         {
           "photo": "4032\u00d73024 (12 MP)",
           "size": "3.1 MB",
-          "announce_ms": 2.503907999198418,
-          "chunks_ms": 21.048189000794082,
-          "chunk MB/s": 146.3897440242367,
-          "complete_ms": 298.49311399993894,
-          "total_ms": 321.79713799996534
+          "encrypt_ms": 353.47890999946685,
+          "announce_ms": 3.096377000474604,
+          "chunks_ms": 20.37168999959249,
+          "chunk MB/s": 151.28597578608603,
+          "complete_ms": 26.034030999653623,
+          "total_ms": 50.0223150011152
         },
         {
           "photo": "4032\u00d73024, heavy grain",
           "size": "8.7 MB",
-          "announce_ms": 2.579354999397765,
-          "chunks_ms": 38.4693519990833,
-          "chunk MB/s": 226.46620094374353,
-          "complete_ms": 350.8330950007803,
-          "total_ms": 391.67241500035743
+          "encrypt_ms": 540.8589460002986,
+          "announce_ms": 3.297582999948645,
+          "chunks_ms": 53.282155999113456,
+          "chunk MB/s": 163.5221555251062,
+          "complete_ms": 46.07119300089835,
+          "total_ms": 102.49125799964531
         }
       ],
-      "note": "complete = assemble + SHA-256 + validate + thumbnail + metadata + the fenced report to the orchestrator. Over loopback; on a phone the chunk phase is bounded by the network."
+      "note": "encrypt = the client's thumbnail, preview and AES-GCM, before the announce (not in total). complete = assemble + SHA-256 + header check + metadata + the fenced report to the orchestrator; the server no longer decodes images. Over loopback; on a phone the chunk phase is bounded by the network."
     },
     {
       "name": "6. Live delivery to a 10-member session (20 photos of 800\u00d7600)",
@@ -228,20 +264,20 @@
         {
           "measure": "event appended \u2192 frame received (each member)",
           "n": 200,
-          "p50_ms": 2.5870361328125,
-          "p95_ms": 4.28819580078125,
-          "p99_ms": 4.475439453125,
-          "mean_ms": 2.9036328125,
-          "max_ms": 4.493408203125
+          "p50_ms": 6.56787109375,
+          "p95_ms": 10.49727783203125,
+          "p99_ms": 11.23164306640625,
+          "mean_ms": 6.336929931640625,
+          "max_ms": 11.316650390625
         },
         {
           "measure": "upload start \u2192 last of 10 members received",
           "n": 20,
-          "p50_ms": 158.72314453125,
-          "p95_ms": 166.54815673828125,
-          "p99_ms": 167.80709228515624,
-          "mean_ms": 158.27938232421874,
-          "max_ms": 168.121826171875
+          "p50_ms": 52.6485595703125,
+          "p95_ms": 87.13168945312503,
+          "p99_ms": 125.99411132812494,
+          "mean_ms": 59.4255615234375,
+          "max_ms": 135.709716796875
         }
       ],
       "note": "The first row is the fan-out path alone: Redis stream \u2192 XREAD \u2192 WebSocket. The second adds the upload."
@@ -252,28 +288,28 @@
         {
           "measure": "event appended \u2192 frame received",
           "n": 3060,
-          "p50_ms": 28.8427734375,
-          "p95_ms": 31.323132324219458,
-          "p99_ms": 35.788046875,
-          "mean_ms": 28.104925816355188,
-          "max_ms": 36.339111328125
+          "p50_ms": 58.6710205078125,
+          "p95_ms": 70.840576171875,
+          "p99_ms": 72.72628173828124,
+          "mean_ms": 51.40404092626634,
+          "max_ms": 73.30810546875
         }
       ],
-      "note": "3060/3060 deliveries. All 153 sockets connected and ready in 0.25 s (sign-in and session setup took 3.3 s before that). Redis connections: 131 \u2192 284 (+153): each open socket holds one blocking Redis connection (XREAD BLOCK). The pool is PHOTON_REDIS_BLOCKING_POOL (default 200) per orchestrator replica, so it caps open sockets per replica; add replicas or raise it for more."
+      "note": "3060/3060 deliveries. All 153 sockets connected and ready in 0.28 s (sign-in and session setup took 6.8 s before that). Redis connections: 131 \u2192 284 (+153): each open socket holds one blocking Redis connection (XREAD BLOCK). The pool is PHOTON_REDIS_BLOCKING_POOL (default 200) per orchestrator replica, so it caps open sockets per replica; add replicas or raise it for more."
     },
     {
       "name": "8. Upload throughput: 8 members uploading at once (48 photos of 2400\u00d71800)",
       "rows": [
         {
           "photos": 48,
-          "wall_s": 1.9389317229997687,
-          "photos/s": 24.755900081792475,
-          "MB/s": 23.2115130544003,
-          "per-photo p50_ms": 291.02636900006473,
-          "per-photo p95_ms": 388.14416650020576
+          "wall_s": 2.267120681999586,
+          "photos/s": 21.172229771934465,
+          "MB/s": 20.78619121344534,
+          "per-photo p50_ms": 380.7581504988775,
+          "per-photo p95_ms": 425.58303039995735
         }
       ],
-      "note": "45 MB in total. Bound by CPU: hashing, and the two decode subprocesses per photo (validate, thumb), with 16 decoders allowed at once."
+      "note": "47 MB of encrypted files in total. The image server only hashes, checks the header and moves files: no decoding, so it is bound by hashing and disk, not image work."
     }
   ]
 }

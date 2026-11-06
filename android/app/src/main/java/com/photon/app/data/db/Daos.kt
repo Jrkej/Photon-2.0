@@ -111,7 +111,8 @@ interface PendingPhotoDao {
     @Query(
         "UPDATE pending_photos SET state = :state, sha256 = :sha256, size_bytes = :sizeBytes, " +
             "copy_path = :copyPath, upload_id = :uploadId, upload_url = :uploadUrl, chunk_size = :chunkSize, " +
-            "attempts = :attempts, next_attempt_ms = :nextAttemptMs, last_error = :lastError " +
+            "attempts = :attempts, next_attempt_ms = :nextAttemptMs, last_error = :lastError, " +
+            "photo_tag = :photoTag, original_sha256 = :originalSha256 " +
             "WHERE media_id = :mediaId AND state NOT IN ('SYNCED', 'SKIPPED', 'FAILED')",
     )
     suspend fun updateUnlessFinal(
@@ -126,7 +127,29 @@ interface PendingPhotoDao {
         attempts: Int,
         nextAttemptMs: Long,
         lastError: String?,
+        photoTag: String?,
+        originalSha256: String?,
     ): Int
+
+    /**
+     * Another member's upload of the same photo was stored: a different file (another photo key) with the same
+     * photo tag. Like [markSyncedByHash], our copy is not needed.
+     */
+    @Query(
+        "UPDATE pending_photos SET state = 'SYNCED', next_attempt_ms = 0 " +
+            "WHERE photo_tag = :photoTag AND state NOT IN ('SYNCED', 'SKIPPED', 'FAILED')",
+    )
+    suspend fun markSyncedByTag(photoTag: String): Int
+
+    @Query("SELECT COUNT(*) FROM pending_photos WHERE photo_tag = :photoTag")
+    suspend fun countByTag(photoTag: String): Int
+
+    /** Rows deferred until this phone holds the current epoch's key: due now. */
+    @Query(
+        "UPDATE pending_photos SET next_attempt_ms = 0 WHERE session_id = :sessionId AND last_error = :reason " +
+            "AND state NOT IN ('SYNCED', 'SKIPPED', 'FAILED')",
+    )
+    suspend fun wakeKeyWaiters(sessionId: String, reason: String): Int
 
     @Query(
         "UPDATE pending_photos SET state = 'SYNCED', next_attempt_ms = 0 " +
@@ -200,8 +223,18 @@ interface ReceivedPhotoDao {
     @Query("UPDATE received_photos SET media_id = :mediaId WHERE sha256 = :sha256")
     suspend fun setMediaId(sha256: String, mediaId: Long)
 
-    @Query("UPDATE received_photos SET state = 'SAVED' WHERE sha256 = :sha256 AND state NOT IN ('RECALLED', 'EXPIRED')")
+    @Query("UPDATE received_photos SET state = 'SAVED' WHERE sha256 = :sha256 AND state NOT IN ('RECALLED', 'EXPIRED', 'FAILED')")
     suspend fun markSaved(sha256: String): Int
+
+    @Query("UPDATE received_photos SET state = 'FAILED' WHERE sha256 = :sha256 AND state NOT IN ('RECALLED', 'EXPIRED', 'SAVED')")
+    suspend fun markFailed(sha256: String): Int
+
+    /**
+     * Photos whose first download (the thumbnail) hasn't happened: among them, those waiting for an epoch key.
+     * Run again after key maintenance.
+     */
+    @Query("SELECT * FROM received_photos WHERE session_id = :sessionId AND state = 'THUMB' AND thumb_path IS NULL")
+    suspend fun awaitingThumb(sessionId: String): List<ReceivedPhoto>
 
     @Query("UPDATE received_photos SET state = :state, thumb_path = NULL, preview_path = NULL WHERE sha256 = :sha256")
     suspend fun markTerminal(sha256: String, state: String)

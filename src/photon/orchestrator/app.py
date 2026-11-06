@@ -22,6 +22,7 @@ from photon.common.redisutil import (
 from photon.orchestrator import jobs
 from photon.orchestrator.push import Pusher, make_sender
 from photon.orchestrator.routes import events, internal, photos, sessions
+from photon.orchestrator.routes import keys as key_routes
 from photon.orchestrator.svc import OrchestratorKeys, Svc
 
 
@@ -73,6 +74,7 @@ def create_app(settings: Settings | None = None, keys: OrchestratorKeys | None =
     app.include_router(sessions.router(svc, user))
     app.include_router(photos.router(svc, user))
     app.include_router(events.router(svc, user))
+    app.include_router(key_routes.router(svc, user))
     app.include_router(internal.router(svc, service_dependency(keys.imageserver, "orchestrator", "imageserver")))
     want = library_version(library_code())
 

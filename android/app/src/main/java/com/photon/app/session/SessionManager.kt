@@ -9,7 +9,10 @@ import com.photon.app.data.db.PauseWindow
 import com.photon.app.data.db.PhotonDatabase
 import com.photon.app.data.db.SessionState
 import com.photon.app.events.EventConnection
+import com.photon.app.e2ee.Bundle
 import com.photon.app.events.EventSync
+import com.photon.app.keys.KeyManager
+import com.photon.app.keys.KeySync
 import com.photon.app.net.ApiException
 import com.photon.app.net.ErrorCodes
 import com.photon.app.net.PhotonApi
@@ -20,6 +23,7 @@ import com.photon.app.sync.WorkScheduler
 import com.photon.proto.CreateSessionRequest
 import com.photon.proto.JoinRequest
 import com.photon.proto.SessionInfo
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -28,6 +32,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import okio.ByteString.Companion.toByteString
 import java.io.IOException
 
 enum class EndReason { LEFT, KICKED, ENDED, SIGNED_OUT }
@@ -47,6 +52,8 @@ class SessionManager(
     private val connection: () -> EventConnection,
     private val pipeline: () -> ReceivePipeline,
     private val clock: Clock,
+    private val keys: KeyManager,
+    private val keySync: () -> KeySync,
 ) {
     private val mutex = Mutex()
     private val endedFlow = MutableSharedFlow<EndReason>(extraBufferCapacity = 8)
@@ -56,18 +63,48 @@ class SessionManager(
 
     suspend fun current(): SessionState? = db.sessions().get()
 
-    suspend fun create(maxMembers: Int = 0): SessionState =
-        enter(api.createSession(CreateSessionRequest(max_members = maxMembers)))
+    /**
+     * Creates a session. This phone makes epoch 1 (`K_1` and the tag key `D`) before asking, and keeps it once
+     * the server answers; only the member key goes to the server (e2ee.md 5.1).
+     */
+    suspend fun create(maxMembers: Int = 0): SessionState {
+        val epochOne = keys.newSessionBundle()
+        val info = api.createSession(CreateSessionRequest(max_members = maxMembers, member_key = memberKey()))
+        return enter(info, epochOne)
+    }
 
+    /** Joins with this install's member key; the joiner holds no epoch until a member shares it (e2ee.md 5.3). */
     suspend fun join(target: JoinTarget): SessionState {
         val request = when (target) {
-            is JoinTarget.Code -> JoinRequest(code = target.code)
-            is JoinTarget.Invite -> JoinRequest(invite_token = target.token)
+            is JoinTarget.Code -> JoinRequest(code = target.code, member_key = memberKey())
+            is JoinTarget.Invite -> JoinRequest(invite_token = target.token, member_key = memberKey())
         }
         return enter(api.join(request))
     }
 
-    private suspend fun enter(info: SessionInfo): SessionState {
+    /** Off the main thread: the first call makes the key and writes it to encrypted storage. */
+    private suspend fun memberKey() = withContext(Dispatchers.IO) { keys.memberKey().toByteString() }
+
+    /**
+     * The server holds another member key for this user in the local session (the session was joined from
+     * another install, or this install's key was lost): joining again with the code registers this one, and
+     * members seal the key for it (the server answers `REKEYED`). Best effort.
+     */
+    suspend fun rekey(): Boolean {
+        val s = db.sessions().get() ?: return false
+        if (s.joinCode.isEmpty()) return false
+        return try {
+            api.join(JoinRequest(code = s.joinCode, member_key = memberKey()))
+            true
+        } catch (e: IOException) {
+            false
+        } catch (e: ApiException) {
+            Log.w("PHOTON", "joining again with this install's key failed: ${e.code}")
+            false
+        }
+    }
+
+    private suspend fun enter(info: SessionInfo, created: Bundle? = null): SessionState {
         val now = clock.nowMs()
         mutex.withLock {
             val previous = db.sessions().get()
@@ -78,6 +115,8 @@ class SessionManager(
                 return@withLock
             }
             if (previous != null) clearLocal("replaced by ${info.session_id}")
+            // After clearLocal, which drops every session's keys.
+            created?.let { withContext(Dispatchers.IO) { keys.adoptCreatedSession(info.session_id, it) } }
             val state = SessionState(
                 sessionId = info.session_id,
                 userId = tokens.userId.orEmpty(),
@@ -106,6 +145,15 @@ class SessionManager(
             // retried by the connection loop
         } catch (e: ApiException) {
             if (!onSessionError(e)) throw e
+        }
+        // Key maintenance: a joiner may find a key already shared, a creator seals for whoever joined meanwhile.
+        // Offline, the catch-up and the event stream run it again.
+        try {
+            keySync().runNow()
+        } catch (e: IOException) {
+            keySync().maintenanceNeeded()
+        } catch (e: ApiException) {
+            Log.w("PHOTON", "key maintenance after entering failed: ${e.code}")
         }
         startSyncing("session entered")
         return db.sessions().get() ?: throw IllegalStateException("session ended while joining")
@@ -298,7 +346,8 @@ class SessionManager(
 
     /**
      * 7.12: stop the service, cancel the session's work, delete cached copies and thumbnails,
-     * and clear the session tables. `hashes` and `received_assets` stay for 24 hours.
+     * clear the session tables and the session's keys. `hashes` and `received_assets` stay for
+     * 24 hours; the member key stays for the next session.
      */
     suspend fun endLocally(reason: EndReason) {
         val ended = withContext(NonCancellable) {
@@ -324,6 +373,8 @@ class SessionManager(
             db.received().clear()
         }
         cache.clearSessionFiles()
+        withContext(Dispatchers.IO) { keys.clearAll() }
+        keySync().forgetSession()
         scheduler.schedulePurge(PURGE_AFTER_MS)
     }
 

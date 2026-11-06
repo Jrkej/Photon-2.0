@@ -1,5 +1,6 @@
-"""Chunk upload, resume status and the idempotent complete(): assemble, hash, validate, thumbnail, report.
-A photo is announced to the session only after its SHA-256 matched and the file was saved."""
+"""Chunk upload, resume status and the idempotent complete(): assemble, hash, check the header, report.
+A photo is announced to the session only after its SHA-256 matched and the file was saved. Files are end-to-end
+encrypted (e2ee.md): the server reads only their plaintext header and never sees a photo."""
 
 from __future__ import annotations
 
@@ -14,13 +15,12 @@ from typing import Any
 import google_crc32c
 from fastapi import Request
 
-from photon.common import clock, logs, metrics
+from photon.common import clock, e2ee, logs, metrics
 from photon.common.config import Settings
 from photon.common.errors import ApiError
 from photon.common.pb import photon_pb2 as pb
 from photon.imageserver import upload_state as U
 from photon.imageserver.access import Access, UploadClaims
-from photon.imageserver.decode import Decoder
 from photon.imageserver.outbox import APPLIED, NOOP, SUPERSEDED, Outbox, Record
 from photon.imageserver.store import Store, fsync_dir, read_json, write_json
 
@@ -29,8 +29,8 @@ BLOCK = 1024 * 1024
 
 
 class Pipeline:
-    def __init__(self, settings: Settings, store: Store, access: Access, decoder: Decoder, outbox: Outbox) -> None:
-        self.settings, self.store, self.access, self.decoder, self.outbox = settings, store, access, decoder, outbox
+    def __init__(self, settings: Settings, store: Store, access: Access, outbox: Outbox) -> None:
+        self.settings, self.store, self.access, self.outbox = settings, store, access, outbox
         outbox.on_final = self.apply_final
         self.usage: dict[str, int] = {}  # bytes under tmp/{upload_id}, for the temporary-disk budget
         self.writing = 0
@@ -83,7 +83,8 @@ class Pipeline:
         async with U.locked(self.store, c.upload_id):
             st = U.load(self.store, c.upload_id)
             if st is None:
-                st = U.UploadState(c.upload_id, c.sid, c.sha256, c.size, c.mime, c.taken_at_ms, c.uploader)
+                st = U.UploadState(c.upload_id, c.sid, c.sha256, c.size, c.mime, c.taken_at_ms, c.uploader,
+                                   key_epoch=c.key_epoch)
                 U.save(self.store, st)
             if st.state != U.RECEIVING:
                 raise ApiError("UPLOAD_FINALIZED")
@@ -171,7 +172,8 @@ class Pipeline:
                     # otherwise the chunk check below lists every chunk as missing.
                     if not await self.access.lease_exists(c.sid, c.upload_id):
                         raise ApiError("UNKNOWN_UPLOAD")
-                    st = U.UploadState(c.upload_id, c.sid, c.sha256, c.size, c.mime, c.taken_at_ms, c.uploader)
+                    st = U.UploadState(c.upload_id, c.sid, c.sha256, c.size, c.mime, c.taken_at_ms, c.uploader,
+                                       key_epoch=c.key_epoch)
                     U.save(self.store, st)
                 done = self._answer(st)
                 if done is not None:
@@ -202,54 +204,53 @@ class Pipeline:
             self._report_stored(st)
             return
 
-        if st.state == U.RECEIVING:
-            sizes = store.chunk_sizes(st.upload_id)
-            missing = [i for i in range(chunk_count) if i not in sizes]
-            if chunk_count <= 0 or missing:
-                raise ApiError("INVALID_REQUEST", "Chunks missing", missing_chunks=missing or [0])
-            if any(i >= chunk_count for i in sizes):
-                raise ApiError("INVALID_REQUEST", "Chunks beyond chunk_count were received")
-            if sum(sizes.values()) != st.size:
-                raise ApiError("INVALID_REQUEST", "Received bytes do not add up to the announced size")
-            st.state = U.VERIFYING
-            U.save(store, st)
-            digest = await asyncio.to_thread(self._assemble, st.upload_id, chunk_count)
-            assembled = store.upload_dir(st.upload_id) / "assembled"
-            if digest != st.sha256:
-                self._reject(st, "HASH_MISMATCH")
-            res = await self.decoder.run("validate", assembled, None, st.mime)
-            if not res.ok:
-                log.info("invalid_image", upload_id=st.upload_id, kind=res.kind, info=res.info)
-                self._reject(st, "INVALID_IMAGE")
-            staged = store.staged_dir(st.upload_id)
-            staged.mkdir(parents=True, exist_ok=True)
-            os.replace(assembled, staged / "original")
-            fsync_dir(staged)
-            st.state = U.VERIFIED
-            st.result = {"width": res.info.get("width", 0), "height": res.info.get("height", 0)}
-            U.save(store, st)
-
-        # VERIFIED: the thumbnail. Never reported without one.
-        staged = store.staged_dir(st.upload_id)
-        st.thumb_attempts += 1
+        sizes = store.chunk_sizes(st.upload_id)
+        missing = [i for i in range(chunk_count) if i not in sizes]
+        if chunk_count <= 0 or missing:
+            raise ApiError("INVALID_REQUEST", "Chunks missing", missing_chunks=missing or [0])
+        if any(i >= chunk_count for i in sizes):
+            raise ApiError("INVALID_REQUEST", "Chunks beyond chunk_count were received")
+        if sum(sizes.values()) != st.size:
+            raise ApiError("INVALID_REQUEST", "Received bytes do not add up to the announced size")
+        st.state = U.VERIFYING
         U.save(store, st)
-        res = await self.decoder.run("thumb", staged / "original", staged / "thumb.webp", st.mime,
-                                     self.settings.thumb_px)
-        if not res.ok:
-            if res.kind == "invalid" or st.thumb_attempts >= self.settings.thumb_attempts:
-                self._reject(st, "INVALID_IMAGE")
-            raise ApiError("PROCESSING_FAILED", "Thumbnail generation failed, retry", retry_after_s=5)
+        digest = await asyncio.to_thread(self._assemble, st.upload_id, chunk_count)
+        assembled = store.upload_dir(st.upload_id) / "assembled"
+        if digest != st.sha256:
+            self._reject(st, "HASH_MISMATCH")
+        header = self._check_header(st, assembled)
+        staged = store.staged_dir(st.upload_id)
+        staged.mkdir(parents=True, exist_ok=True)
+        os.replace(assembled, staged / "file")
+        fsync_dir(staged)
 
         now = clock.now_ms()
         meta = {
             "sid": st.sid, "sha256": st.sha256, "size": st.size, "mime": st.mime, "uploader": st.uploader,
-            "upload_id": st.upload_id, "taken_at_ms": st.taken_at_ms, "width": st.result.get("width", 0),
-            "height": st.result.get("height", 0), "stored_at_ms": now,
+            "upload_id": st.upload_id, "taken_at_ms": st.taken_at_ms, "key_epoch": header.epoch,
+            "header_len": e2ee.HEADER_LEN, "lengths": list(header.lengths), "stored_at_ms": now,
             "expires_at_ms": now + self.settings.retention_ms,
         }
         write_json(staged / "meta.json", meta)
         st.result = {"stored_at_ms": meta["stored_at_ms"], "expires_at_ms": meta["expires_at_ms"]}
         self._report_stored(st)
+
+    def _check_header(self, st: U.UploadState, assembled: Path) -> e2ee.Header:
+        """The only look the server gets: the encrypted file's plaintext header (e2ee.md 8). The photo itself, its
+        type and dimensions are encrypted, so the server can't decode or screen it; receivers decode defensively."""
+        with open(assembled, "rb") as f:
+            head = f.read(e2ee.HEADER_LEN)
+        try:
+            header = e2ee.parse_header(head)
+        except e2ee.E2eeError as e:
+            log.info("invalid_file", upload_id=st.upload_id, error=str(e))
+            self._reject(st, "INVALID_IMAGE")
+            raise  # unreachable: _reject raises
+        if header.size != st.size or header.epoch != st.key_epoch:
+            log.info("invalid_file", upload_id=st.upload_id, header_size=header.size, size=st.size,
+                     header_epoch=header.epoch, epoch=st.key_epoch)
+            self._reject(st, "INVALID_IMAGE")
+        return header
 
     def _assemble(self, upload_id: str, chunk_count: int) -> str:
         """Streams the chunks into one file while hashing, deleting each chunk once consumed."""

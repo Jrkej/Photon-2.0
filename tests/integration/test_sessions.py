@@ -3,16 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 
 import pytest
 
 from photon.client.api import ClientError
-from photon.common import clock
+from photon.common import clock, e2ee
 from photon.common.pb import photon_pb2 as pb
 from photon.orchestrator import jobs
 from photon.orchestrator import keys as K
-from tests.conftest import Login, Stack, jpeg
+from tests.conftest import Login, Stack, announce_built, build, jpeg
 
 
 async def test_create_and_join_by_code_and_invite(login: Login) -> None:
@@ -26,6 +25,24 @@ async def test_create_and_join_by_code_and_invite(login: Login) -> None:
     joined = await carol.join(invite_token=token)
     assert set(joined.member_ids) == {alice.uid, bob.uid, carol.uid}
     assert (await bob.join(code=info.join_code)).role == "member"  # joining again is idempotent
+    members = {m.member_id: m for m in (await alice.key_state(info.session_id)).members}
+    assert members[bob.uid].member_key == bob.keys.member_key and members[alice.uid].key_epoch == 1
+    assert members[carol.uid].key_epoch == 0  # nobody has sealed the key for Carol yet
+
+
+@pytest.mark.parametrize("member_key", [b"", b"\1" * 31, b"\1" * 33])
+async def test_create_and_join_need_a_member_key(login: Login, member_key: bytes) -> None:
+    """Every member sends its X25519 public key, so members can seal the session key for it (e2ee.md 5)."""
+    alice, bob = await login("alice"), await login("bob")
+    with pytest.raises(ClientError) as e:
+        await alice.call("POST", "/v1/sessions", pb.CreateSessionRequest(member_key=member_key), pb.SessionInfo)
+    assert (e.value.status, e.value.code) == (400, "INVALID_REQUEST")
+    info = await alice.create_session()
+    with pytest.raises(ClientError) as e:
+        await bob.call("POST", "/v1/sessions/join", pb.JoinRequest(code=info.join_code, member_key=member_key),
+                       pb.SessionInfo)
+    assert (e.value.status, e.value.code) == (400, "INVALID_REQUEST")
+    assert set((await alice.session(info.session_id)).member_ids) == {alice.uid}
 
 
 async def test_unknown_code(login: Login) -> None:
@@ -107,9 +124,11 @@ async def test_kick(login: Login, env: Stack) -> None:
     sid = info.session_id
     await bob.join(code=info.join_code)
     await eve.join(code=info.join_code)
-    data = jpeg(7)
-    await eve.announce(sid, hashlib.sha256(data).digest(), len(data), "image/jpeg", clock.now_ms())
-    assert int(await env.redis.hget(K.session(sid), "reserved_bytes")) == len(data)
+    await host.sync_keys(sid)
+    await eve.sync_keys(sid)
+    built = await build(eve, sid, jpeg(7))
+    await announce_built(eve, sid, built)
+    assert int(await env.redis.hget(K.session(sid), "reserved_bytes")) == len(built.file)
     with pytest.raises(ClientError) as e:
         await bob.kick(sid, eve.uid)
     assert e.value.code == "FORBIDDEN"
@@ -122,6 +141,8 @@ async def test_kick(login: Login, env: Stack) -> None:
     with pytest.raises(ClientError) as e:
         await eve.snapshot(sid)
     assert e.value.code == "NOT_A_MEMBER"
+    state = await host.key_state(sid)  # Eve still holds epoch 1: the next upload must rotate it away
+    assert state.rotation_required and eve.uid not in {m.member_id for m in state.members}
 
 
 async def test_end_is_host_only_and_tombstoned(login: Login, env: Stack) -> None:
@@ -134,7 +155,8 @@ async def test_end_is_host_only_and_tombstoned(login: Login, env: Stack) -> None
     assert e.value.code == "FORBIDDEN"
     await host.end(sid)
     await host.end(sid)  # idempotent
-    for call in (bob.snapshot(sid), bob.announce(sid, b"x" * 32, 10, "image/jpeg", clock.now_ms())):
+    for call in (bob.snapshot(sid), bob.announce(sid, b"x" * 32, 10, e2ee.MIME, clock.now_ms(), b"t" * 32, 1),
+                 bob.key_state(sid)):
         with pytest.raises(ClientError) as e:
             await call
         assert (e.value.status, e.value.code) == (410, "SESSION_ENDED")

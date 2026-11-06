@@ -1,0 +1,15 @@
+$ photon-cli --profile bob listen --save-dir ./received
+1793623947107-0 PHOTO_STORED b0423e8f021f3aa8 by 07d2d064-e083-4be2-9704-12993284eb0f (876394 B)
+1793623947708-0 PHOTO_STORED a6e1d483ff4eb9a6 by 07d2d064-e083-4be2-9704-12993284eb0f (880149 B)
+
+$ photon-cli --profile bob snapshot
+cursor 1793623947708-0
+members 07d2d064-e083-4be2-9704-12993284eb0f, fee37c28-7aa9-4938-8912-d2e116f0702b
+(snapshot) PHOTO_STORED a6e1d483ff4eb9a6 by 07d2d064-e083-4be2-9704-12993284eb0f (880149 B)
+(snapshot) PHOTO_STORED b0423e8f021f3aa8 by 07d2d064-e083-4be2-9704-12993284eb0f (876394 B)
+
+$ sha256sum pics/*.jpg received/*
+b0423e8f021f3aa888f93b8b7b485e5bfd1120e108624cef76b2e0650b0fc2aa  pics/IMG_2041.jpg
+a6e1d483ff4eb9a61a35cd86e66820568c98c173b85d537d6322fbb746974df4  pics/IMG_2042.jpg
+a6e1d483ff4eb9a61a35cd86e66820568c98c173b85d537d6322fbb746974df4  received/a6e1d483ff4eb9a6.jpg
+b0423e8f021f3aa888f93b8b7b485e5bfd1120e108624cef76b2e0650b0fc2aa  received/b0423e8f021f3aa8.jpg

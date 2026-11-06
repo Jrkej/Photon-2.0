@@ -8,18 +8,22 @@ from typing import ClassVar as _ClassVar, Optional as _Optional, Union as _Union
 DESCRIPTOR: _descriptor.FileDescriptor
 
 class AnnounceRequest(_message.Message):
-    __slots__ = ("sha256", "size", "mime", "taken_at_ms", "session_id")
+    __slots__ = ("sha256", "size", "mime", "taken_at_ms", "session_id", "photo_tag", "key_epoch")
     SHA256_FIELD_NUMBER: _ClassVar[int]
     SIZE_FIELD_NUMBER: _ClassVar[int]
     MIME_FIELD_NUMBER: _ClassVar[int]
     TAKEN_AT_MS_FIELD_NUMBER: _ClassVar[int]
     SESSION_ID_FIELD_NUMBER: _ClassVar[int]
+    PHOTO_TAG_FIELD_NUMBER: _ClassVar[int]
+    KEY_EPOCH_FIELD_NUMBER: _ClassVar[int]
     sha256: bytes
     size: int
     mime: str
     taken_at_ms: int
     session_id: str
-    def __init__(self, sha256: _Optional[bytes] = ..., size: _Optional[int] = ..., mime: _Optional[str] = ..., taken_at_ms: _Optional[int] = ..., session_id: _Optional[str] = ...) -> None: ...
+    photo_tag: bytes
+    key_epoch: int
+    def __init__(self, sha256: _Optional[bytes] = ..., size: _Optional[int] = ..., mime: _Optional[str] = ..., taken_at_ms: _Optional[int] = ..., session_id: _Optional[str] = ..., photo_tag: _Optional[bytes] = ..., key_epoch: _Optional[int] = ...) -> None: ...
 
 class AnnounceResponse(_message.Message):
     __slots__ = ("result", "upload_id", "upload_url", "upload_token", "chunk_size_hint")
@@ -78,7 +82,7 @@ class PhotoRejected(_message.Message):
     def __init__(self, session_id: _Optional[str] = ..., sha256: _Optional[bytes] = ..., upload_id: _Optional[str] = ..., reason: _Optional[str] = ...) -> None: ...
 
 class PhotoEvent(_message.Message):
-    __slots__ = ("event_id", "type", "session_id", "sha256", "uploader_id", "size", "taken_at_ms", "expires_at_ms", "member_id")
+    __slots__ = ("event_id", "type", "session_id", "sha256", "uploader_id", "size", "taken_at_ms", "expires_at_ms", "member_id", "member_key", "key_epoch", "photo_tag")
     class Type(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
         __slots__ = ()
         PHOTO_STORED: _ClassVar[PhotoEvent.Type]
@@ -87,12 +91,16 @@ class PhotoEvent(_message.Message):
         MEMBER_LEFT: _ClassVar[PhotoEvent.Type]
         SESSION_ENDED: _ClassVar[PhotoEvent.Type]
         HOST_CHANGED: _ClassVar[PhotoEvent.Type]
+        KEY_SHARED: _ClassVar[PhotoEvent.Type]
+        KEY_ROTATED: _ClassVar[PhotoEvent.Type]
     PHOTO_STORED: PhotoEvent.Type
     PHOTO_RECALLED: PhotoEvent.Type
     MEMBER_JOINED: PhotoEvent.Type
     MEMBER_LEFT: PhotoEvent.Type
     SESSION_ENDED: PhotoEvent.Type
     HOST_CHANGED: PhotoEvent.Type
+    KEY_SHARED: PhotoEvent.Type
+    KEY_ROTATED: PhotoEvent.Type
     EVENT_ID_FIELD_NUMBER: _ClassVar[int]
     TYPE_FIELD_NUMBER: _ClassVar[int]
     SESSION_ID_FIELD_NUMBER: _ClassVar[int]
@@ -102,6 +110,9 @@ class PhotoEvent(_message.Message):
     TAKEN_AT_MS_FIELD_NUMBER: _ClassVar[int]
     EXPIRES_AT_MS_FIELD_NUMBER: _ClassVar[int]
     MEMBER_ID_FIELD_NUMBER: _ClassVar[int]
+    MEMBER_KEY_FIELD_NUMBER: _ClassVar[int]
+    KEY_EPOCH_FIELD_NUMBER: _ClassVar[int]
+    PHOTO_TAG_FIELD_NUMBER: _ClassVar[int]
     event_id: str
     type: PhotoEvent.Type
     session_id: str
@@ -111,19 +122,24 @@ class PhotoEvent(_message.Message):
     taken_at_ms: int
     expires_at_ms: int
     member_id: str
-    def __init__(self, event_id: _Optional[str] = ..., type: _Optional[_Union[PhotoEvent.Type, str]] = ..., session_id: _Optional[str] = ..., sha256: _Optional[bytes] = ..., uploader_id: _Optional[str] = ..., size: _Optional[int] = ..., taken_at_ms: _Optional[int] = ..., expires_at_ms: _Optional[int] = ..., member_id: _Optional[str] = ...) -> None: ...
+    member_key: bytes
+    key_epoch: int
+    photo_tag: bytes
+    def __init__(self, event_id: _Optional[str] = ..., type: _Optional[_Union[PhotoEvent.Type, str]] = ..., session_id: _Optional[str] = ..., sha256: _Optional[bytes] = ..., uploader_id: _Optional[str] = ..., size: _Optional[int] = ..., taken_at_ms: _Optional[int] = ..., expires_at_ms: _Optional[int] = ..., member_id: _Optional[str] = ..., member_key: _Optional[bytes] = ..., key_epoch: _Optional[int] = ..., photo_tag: _Optional[bytes] = ...) -> None: ...
 
 class Snapshot(_message.Message):
-    __slots__ = ("cursor", "live_photos", "recalled_sha256", "member_ids")
+    __slots__ = ("cursor", "live_photos", "recalled_sha256", "member_ids", "key_epoch")
     CURSOR_FIELD_NUMBER: _ClassVar[int]
     LIVE_PHOTOS_FIELD_NUMBER: _ClassVar[int]
     RECALLED_SHA256_FIELD_NUMBER: _ClassVar[int]
     MEMBER_IDS_FIELD_NUMBER: _ClassVar[int]
+    KEY_EPOCH_FIELD_NUMBER: _ClassVar[int]
     cursor: str
     live_photos: _containers.RepeatedCompositeFieldContainer[PhotoEvent]
     recalled_sha256: _containers.RepeatedScalarFieldContainer[bytes]
     member_ids: _containers.RepeatedScalarFieldContainer[str]
-    def __init__(self, cursor: _Optional[str] = ..., live_photos: _Optional[_Iterable[_Union[PhotoEvent, _Mapping]]] = ..., recalled_sha256: _Optional[_Iterable[bytes]] = ..., member_ids: _Optional[_Iterable[str]] = ...) -> None: ...
+    key_epoch: int
+    def __init__(self, cursor: _Optional[str] = ..., live_photos: _Optional[_Iterable[_Union[PhotoEvent, _Mapping]]] = ..., recalled_sha256: _Optional[_Iterable[bytes]] = ..., member_ids: _Optional[_Iterable[str]] = ..., key_epoch: _Optional[int] = ...) -> None: ...
 
 class Error(_message.Message):
     __slots__ = ("code", "message", "retryable", "retry_after_s", "missing_chunks")
@@ -196,10 +212,12 @@ class DeviceRegistration(_message.Message):
     def __init__(self, platform: _Optional[str] = ..., push_token: _Optional[str] = ...) -> None: ...
 
 class CreateSessionRequest(_message.Message):
-    __slots__ = ("max_members",)
+    __slots__ = ("max_members", "member_key")
     MAX_MEMBERS_FIELD_NUMBER: _ClassVar[int]
+    MEMBER_KEY_FIELD_NUMBER: _ClassVar[int]
     max_members: int
-    def __init__(self, max_members: _Optional[int] = ...) -> None: ...
+    member_key: bytes
+    def __init__(self, max_members: _Optional[int] = ..., member_key: _Optional[bytes] = ...) -> None: ...
 
 class SessionInfo(_message.Message):
     __slots__ = ("session_id", "join_code", "invite_url", "qr_payload", "expires_at_ms", "role", "member_ids", "host_id")
@@ -222,12 +240,14 @@ class SessionInfo(_message.Message):
     def __init__(self, session_id: _Optional[str] = ..., join_code: _Optional[str] = ..., invite_url: _Optional[str] = ..., qr_payload: _Optional[str] = ..., expires_at_ms: _Optional[int] = ..., role: _Optional[str] = ..., member_ids: _Optional[_Iterable[str]] = ..., host_id: _Optional[str] = ...) -> None: ...
 
 class JoinRequest(_message.Message):
-    __slots__ = ("code", "invite_token")
+    __slots__ = ("code", "invite_token", "member_key")
     CODE_FIELD_NUMBER: _ClassVar[int]
     INVITE_TOKEN_FIELD_NUMBER: _ClassVar[int]
+    MEMBER_KEY_FIELD_NUMBER: _ClassVar[int]
     code: str
     invite_token: str
-    def __init__(self, code: _Optional[str] = ..., invite_token: _Optional[str] = ...) -> None: ...
+    member_key: bytes
+    def __init__(self, code: _Optional[str] = ..., invite_token: _Optional[str] = ..., member_key: _Optional[bytes] = ...) -> None: ...
 
 class SessionRef(_message.Message):
     __slots__ = ("session_id",)
@@ -364,3 +384,55 @@ class DevLoginRequest(_message.Message):
     USERNAME_FIELD_NUMBER: _ClassVar[int]
     username: str
     def __init__(self, username: _Optional[str] = ...) -> None: ...
+
+class MemberKey(_message.Message):
+    __slots__ = ("member_id", "member_key", "key_epoch")
+    MEMBER_ID_FIELD_NUMBER: _ClassVar[int]
+    MEMBER_KEY_FIELD_NUMBER: _ClassVar[int]
+    KEY_EPOCH_FIELD_NUMBER: _ClassVar[int]
+    member_id: str
+    member_key: bytes
+    key_epoch: int
+    def __init__(self, member_id: _Optional[str] = ..., member_key: _Optional[bytes] = ..., key_epoch: _Optional[int] = ...) -> None: ...
+
+class SealedKey(_message.Message):
+    __slots__ = ("member_id", "epoch", "box", "from_member_id")
+    MEMBER_ID_FIELD_NUMBER: _ClassVar[int]
+    EPOCH_FIELD_NUMBER: _ClassVar[int]
+    BOX_FIELD_NUMBER: _ClassVar[int]
+    FROM_MEMBER_ID_FIELD_NUMBER: _ClassVar[int]
+    member_id: str
+    epoch: int
+    box: bytes
+    from_member_id: str
+    def __init__(self, member_id: _Optional[str] = ..., epoch: _Optional[int] = ..., box: _Optional[bytes] = ..., from_member_id: _Optional[str] = ...) -> None: ...
+
+class KeyState(_message.Message):
+    __slots__ = ("epoch", "rotation_required", "members", "sealed")
+    EPOCH_FIELD_NUMBER: _ClassVar[int]
+    ROTATION_REQUIRED_FIELD_NUMBER: _ClassVar[int]
+    MEMBERS_FIELD_NUMBER: _ClassVar[int]
+    SEALED_FIELD_NUMBER: _ClassVar[int]
+    epoch: int
+    rotation_required: bool
+    members: _containers.RepeatedCompositeFieldContainer[MemberKey]
+    sealed: _containers.RepeatedCompositeFieldContainer[SealedKey]
+    def __init__(self, epoch: _Optional[int] = ..., rotation_required: _Optional[bool] = ..., members: _Optional[_Iterable[_Union[MemberKey, _Mapping]]] = ..., sealed: _Optional[_Iterable[_Union[SealedKey, _Mapping]]] = ...) -> None: ...
+
+class KeyUpload(_message.Message):
+    __slots__ = ("epoch", "rotate", "keys")
+    EPOCH_FIELD_NUMBER: _ClassVar[int]
+    ROTATE_FIELD_NUMBER: _ClassVar[int]
+    KEYS_FIELD_NUMBER: _ClassVar[int]
+    epoch: int
+    rotate: bool
+    keys: _containers.RepeatedCompositeFieldContainer[SealedKey]
+    def __init__(self, epoch: _Optional[int] = ..., rotate: _Optional[bool] = ..., keys: _Optional[_Iterable[_Union[SealedKey, _Mapping]]] = ...) -> None: ...
+
+class KeyUploadResult(_message.Message):
+    __slots__ = ("epoch", "stored")
+    EPOCH_FIELD_NUMBER: _ClassVar[int]
+    STORED_FIELD_NUMBER: _ClassVar[int]
+    epoch: int
+    stored: int
+    def __init__(self, epoch: _Optional[int] = ..., stored: _Optional[int] = ...) -> None: ...

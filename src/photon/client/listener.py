@@ -1,5 +1,8 @@
 """Receive side: snapshot, then the WebSocket from the snapshot's cursor, with dedupe by event id and hash.
-Delivery is at-least-once; dropping what was already processed makes the effect exactly-once."""
+Delivery is at-least-once; dropping what was already processed makes the effect exactly-once.
+
+The listener also does key maintenance (e2ee.md 5.3): on start, when a member joins, when a key is shared with this
+member and when the key rotates, it fetches sealed keys and seals the ones it holds for members who lack them."""
 
 from __future__ import annotations
 
@@ -24,9 +27,10 @@ def id_tuple(event_id: str) -> tuple[int, int]:
 
 class Listener:
     def __init__(self, client: PhotonClient, sid: str, on_event: OnEvent | None = None,
-                 ping_interval_s: float = 30.0) -> None:
+                 ping_interval_s: float = 30.0, keys: bool = True) -> None:
         self.client, self.sid, self.on_event = client, sid, on_event
         self.ping_interval_s = ping_interval_s
+        self.keys = keys
         self.cursor: str | None = None
         self.hashes: set[bytes] = set()
         self.recalled: set[bytes] = set()
@@ -41,8 +45,24 @@ class Listener:
         base = self.client.api_base
         return ("wss://" + base[8:] if base.startswith("https://") else "ws://" + base[7:]) + "/v1/ws"
 
+    async def sync_keys(self) -> None:
+        if not self.keys:
+            return
+        try:
+            await self.client.sync_keys(self.sid)
+        except ClientError:
+            pass  # the next key event, reconnect or upload runs it again
+
+    def _needs_keys(self, ev: pb.PhotoEvent) -> bool:
+        if ev.type in (pb.PhotoEvent.MEMBER_JOINED, pb.PhotoEvent.KEY_ROTATED):
+            return ev.member_id != self.client.uid  # someone to seal for, or a new box for this member
+        return ev.type == pb.PhotoEvent.KEY_SHARED and ev.member_id == self.client.uid
+
     async def load_snapshot(self) -> None:
+        # Snapshot first, then keys: a key shared after the snapshot's cursor still arrives as an event, while one
+        # shared between a key sync and a later snapshot would fall behind the cursor and never be seen.
         snap = await self.client.snapshot(self.sid)
+        await self.sync_keys()
         self.members = set(snap.member_ids)
         for sha in snap.recalled_sha256:
             self.recalled.add(sha)
@@ -64,6 +84,8 @@ class Listener:
                 self.members.discard(ev.member_id)
             elif ev.type == pb.PhotoEvent.HOST_CHANGED:
                 self.host = ev.member_id
+            if self._needs_keys(ev):
+                await self.sync_keys()
             self.events.append(ev)
             if self.on_event:
                 await self.on_event(ev)

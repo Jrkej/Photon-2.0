@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import io
 import shutil
 import socket
@@ -24,9 +25,12 @@ from redis.asyncio import Redis
 
 from photon import migrate
 from photon.auth import app as auth_app
+from photon.client import images
 from photon.client.api import PhotonClient
-from photon.common import clock, jwtutil
+from photon.client.uploader import build_file
+from photon.common import clock, e2ee, jwtutil
 from photon.common.config import Settings
+from photon.common.pb import photon_pb2 as pb
 from photon.common.redisutil import ensure_library
 from photon.dev.gateway import Gateway
 from photon.imageserver import app as img_app
@@ -109,7 +113,6 @@ def settings(redis_url: str, database_url: str, tmp_path_factory: pytest.TempPat
         imageserver_internal_url=img,
         public_base_url="https://photon.test",
         run_jobs=False,
-        decode_concurrency=4,
         ws_block_ms=300,
         complete_report_wait_s=3.0,
         announce_per_minute=10_000,
@@ -218,6 +221,57 @@ def png(size: tuple[int, int] = (32, 32)) -> bytes:
     buf = io.BytesIO()
     Image.new("RGB", size, (10, 200, 30)).save(buf, "PNG")
     return buf.getvalue()
+
+
+async def share_keys(sid: str, *clients: PhotonClient) -> None:
+    """Key maintenance for tests without listeners (e2ee.md 5.3). Each client seals what it holds for members who
+    lack it, then a second pass lets everyone open what was sealed for them. Put a key holder first."""
+    for c in clients:
+        await c.sync_keys(sid)
+    for c in clients[1:]:
+        await c.sync_keys(sid)
+
+
+async def group(login: Login, *users: str, max_members: int = 0) -> tuple[str, list[PhotonClient]]:
+    """The first user creates a session, the rest join by code, and everyone gets the session key."""
+    clients = [await login(u) for u in users]
+    info = await clients[0].create_session(max_members)
+    for c in clients[1:]:
+        await c.join(code=info.join_code)
+    await share_keys(info.session_id, *clients)
+    return info.session_id, clients
+
+
+@dataclass
+class Built:
+    """An encrypted photo file ready to announce (e2ee.md 6)."""
+
+    file: bytes
+    tag: bytes
+    epoch: int
+    original: bytes
+
+    @property
+    def sha(self) -> bytes:
+        return hashlib.sha256(self.file).digest()
+
+    @property
+    def sha_hex(self) -> str:
+        return self.sha.hex()
+
+
+async def build(c: PhotonClient, sid: str, original: bytes, taken_at_ms: int = 1_793_700_000_000) -> Built:
+    """Encrypts `original` with the client's newest key for the session, as upload_bytes would."""
+    bundle = await c.current_bundle(sid)
+    assert bundle is not None, "the client holds no key for this session: share_keys first"
+    file = build_file(bundle, original, images.prepare(original), taken_at_ms)
+    return Built(file, e2ee.photo_tag(bundle.tag_key, original), bundle.epoch, original)
+
+
+async def announce_built(c: PhotonClient, sid: str, b: Built, claimed: bytes | None = None,
+                         size: int | None = None) -> pb.AnnounceResponse:
+    return await c.announce(sid, claimed or b.sha, len(b.file) if size is None else size, e2ee.MIME,
+                            clock.now_ms(), b.tag, b.epoch)
 
 
 async def eventually(check: Callable[[], Awaitable[bool]], timeout: float = 5.0, interval: float = 0.05) -> None:

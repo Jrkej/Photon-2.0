@@ -14,10 +14,14 @@ import com.photon.app.core.MediaCache
 import com.photon.app.core.NetworkMonitor
 import com.photon.app.core.Notifications
 import com.photon.app.data.db.PhotonDatabase
+import com.photon.app.data.prefs.EncryptedKeyStore
 import com.photon.app.data.prefs.EncryptedTokenStore
 import com.photon.app.data.prefs.SettingsStore
 import com.photon.app.events.EventConnection
 import com.photon.app.events.EventSync
+import com.photon.app.keys.KeyManager
+import com.photon.app.keys.KeySync
+import com.photon.app.keys.SessionKeyStore
 import com.photon.app.net.HttpClients
 import com.photon.app.net.ImageApi
 import com.photon.app.net.ImageTransport
@@ -34,6 +38,7 @@ import com.photon.app.session.SessionManager
 import com.photon.app.sync.MediaScanner
 import com.photon.app.sync.SyncService
 import com.photon.app.sync.WorkScheduler
+import com.photon.app.upload.PhotoPackager
 import com.photon.app.upload.ThroughputEstimator
 import com.photon.app.upload.UploadPreparer
 import com.photon.app.upload.Uploader
@@ -89,10 +94,15 @@ class AppGraph(private val app: Context) {
     val imageTransport by lazy { ImageTransport(http.image) }
     val imageApi by lazy { ImageApi(imageBase, { imageTransport.client }, BuildConfig.REWRITE_LOCAL_URLS) }
 
+    /** End-to-end keys (e2ee.md): this install's member key and the session's epoch bundles, encrypted at rest. */
+    val keyStore: SessionKeyStore by lazy { EncryptedKeyStore(app) }
+    val keys: KeyManager by lazy { KeyManager(api, keyStore) { tokens.userId } }
+    val keySync: KeySync by lazy { KeySync(appScope, db, keys, scheduler) { sessions } }
+
     val sessions: SessionManager by lazy {
-        SessionManager(app, db, api, tokens, scheduler, cache, { eventSync }, { connection }, { pipeline }, clock)
+        SessionManager(app, db, api, tokens, scheduler, cache, { eventSync }, { connection }, { pipeline }, clock, keys) { keySync }
     }
-    val pipeline: ReceivePipeline by lazy { ReceivePipeline(db, scheduler, cache, { sessions }, clock) }
+    val pipeline: ReceivePipeline by lazy { ReceivePipeline(db, scheduler, cache, { sessions }, clock) { keySync } }
     val eventSync: EventSync by lazy { EventSync(db, api, pipeline) { sessions } }
     val connection: EventConnection by lazy {
         EventConnection(
@@ -118,6 +128,8 @@ class AppGraph(private val app: Context) {
             imageApi = imageApi,
             settings = settings,
             preparer = UploadPreparer(app, cache),
+            packager = PhotoPackager(cache),
+            keys = keys,
             cache = cache,
             throughput = ThroughputEstimator(),
             sessions = { sessions },
@@ -126,7 +138,7 @@ class AppGraph(private val app: Context) {
             signedIn = { tokens.signedIn.value },
         )
     }
-    val fetcher by lazy { PhotoFetcher(db, imageApi, cache, GallerySaver(app), clock) }
+    val fetcher by lazy { PhotoFetcher(db, imageApi, cache, GallerySaver(app), keys, clock) }
     /** Browser OAuth (GitHub). The redirect is photon://auth/cb in debug, the App Link in release. */
     val browserOAuth by lazy {
         BrowserOAuth(api, tokens, BuildConfig.OAUTH_REDIRECT_URI) { url ->
@@ -145,7 +157,10 @@ class AppGraph(private val app: Context) {
         }
     }
 
-    /** App start (7.6, 8.5): purge, catch up, reconcile, and try Cronet for the image client. */
+    /**
+     * App start (7.6, 8.5): purge, catch up (which runs key maintenance), reconcile, and try Cronet for the
+     * image client.
+     */
     fun onAppStart() {
         appScope.launch {
             imageTransport.tryEnableCronet(app, imageBase)

@@ -1,0 +1,17 @@
+% Context diagram (Level-0 DFD)
+\begin{tikzpicture}
+\node[blk, minimum width=38mm, minimum height=16mm, font=\small] (sys) at (0,0) {\textbf{PHOTON}\\Auth + Orchestrator\\+ Image server};
+\node[cli, minimum width=25mm] (up) at (-6.0,0) {\textbf{Uploading}\\\textbf{member}};
+\node[cli, minimum width=25mm] (rx) at (6.0,0) {\textbf{Receiving}\\\textbf{members}};
+\node[ext, minimum width=30mm] (idp) at (0,2.7) {\textbf{OAuth provider}\\\scriptsize Google, GitHub};
+\node[ext, minimum width=30mm] (push) at (0,-2.8) {\textbf{Push service}\\\scriptsize FCM, APNs};
+\node[ext, minimum width=25mm] (ops) at (-6.0,-2.8) {\textbf{Operator}\\\scriptsize Prometheus, alerts};
+\draw[arr] ([yshift=3mm]up.east) -- node[lblc, above=0.4mm]{announce, chunks, complete} ([yshift=3mm]sys.west);
+\draw[arr] ([yshift=-3mm]sys.west) -- node[lblc, below=0.4mm]{upload token, result} ([yshift=-3mm]up.east);
+\draw[arr] ([yshift=3mm]sys.east) -- node[lblc, above=0.4mm]{PhotoEvent, photo bytes} ([yshift=3mm]rx.west);
+\draw[arr] ([yshift=-3mm]rx.west) -- node[lblc, below=0.4mm]{snapshot, GET by hash} ([yshift=-3mm]sys.east);
+\draw[darr] (sys.north) -- node[lbl]{code exchange,\\ID token check} (idp.south);
+\draw[arr] (sys.south) -- node[lbl]{wake-up hint} (push.north);
+\draw[dsh] (push.east) -| node[lbl, pos=0.75]{silent push} (rx.south);
+\draw[arr] (sys.south west) -- node[lbl, sloped]{metrics} (ops.north east);
+\end{tikzpicture}

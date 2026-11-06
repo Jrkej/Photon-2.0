@@ -4,7 +4,7 @@
     tmp/{upload_id}/chunks/{n}      received chunks
     tmp/{upload_id}/assembled       being hashed
     tmp/{upload_id}/staged/         verified upload, kept under its upload_id until the orchestrator accepts it
-    photos/{sid}/{sha256}/          promoted: original, thumb.webp, preview.webp, meta.json
+    photos/{sid}/{sha256}/          promoted: file (end-to-end encrypted, e2ee.md) and meta.json
     outbox/{upload_id}.json         pending stored/rejected reports
     trash/                          renamed here, removed in the background
 """

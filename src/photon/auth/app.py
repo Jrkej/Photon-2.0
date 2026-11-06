@@ -27,7 +27,7 @@ from photon.auth.tokens import Tokens
 from photon.common import clock, jwtutil, ratelimit
 from photon.common.config import Settings
 from photon.common.errors import ApiError
-from photon.common.httpapp import add_readyz, client_ip, create_base_app, user_dependency
+from photon.common.httpapp import add_readyz, client_ip, create_base_app, is_local_request, user_dependency
 from photon.common.pb import photon_pb2 as pb
 from photon.common.proto import parse_body, proto_response
 from photon.common.redisutil import make_client
@@ -87,7 +87,7 @@ def create_app(settings: Settings | None = None, keys: AuthKeys | None = None,
         if settings.github_client_id:
             providers["github"] = GitHubProvider(settings.github_client_id, settings.github_client_secret,
                                                  f"{settings.api_base_url}/v1/auth/oauth/return")
-        if settings.env != "prod":
+        if settings.env != "prod" and settings.dev_login != "off":
             providers["dev"] = dev
     if settings.env == "prod" and "dev" in providers:
         raise RuntimeError("the dev login provider must not run in production")
@@ -103,6 +103,13 @@ def create_app(settings: Settings | None = None, keys: AuthKeys | None = None,
     app = create_base_app("photon-auth", settings, lifespan)
     current_user = user_dependency(jwtutil.StaticKeys(dict(keys.published)))
 
+    def dev_allowed(request: Request) -> bool:
+        return "dev" in providers and (settings.dev_login != "local" or is_local_request(request))
+
+    def require_dev(request: Request) -> None:
+        if not dev_allowed(request):
+            raise ApiError("INVALID_REQUEST", "Developer sign-in works only on the server's own machine")
+
     @app.get("/.well-known/jwks.json")
     async def jwks() -> Response:
         return JSONResponse(jwtutil.jwks_document(dict(keys.published)),
@@ -115,6 +122,8 @@ def create_app(settings: Settings | None = None, keys: AuthKeys | None = None,
         provider = providers.get(body.provider)
         if provider is None:
             raise ApiError("INVALID_REQUEST", "Unknown provider")
+        if body.provider == "dev":
+            require_dev(request)
         if body.redirect_uri not in settings.redirect_uris:  # exact match: no prefixes, no wildcards
             raise ApiError("INVALID_REQUEST", "Redirect URI is not registered")
         if len(body.code_challenge) != CHALLENGE_LEN or not all(
@@ -170,12 +179,12 @@ def create_app(settings: Settings | None = None, keys: AuthKeys | None = None,
         return Response(status_code=204)
 
     @app.get("/v1/auth/config")
-    async def auth_config() -> Response:
+    async def auth_config(request: Request) -> Response:
         """What the sign-in screen offers. The Google client id is public (it is in every ID token)."""
         google = providers.get("google")
         return proto_response(pb.AuthConfig(
             google_client_id=google.client_id if isinstance(google, GoogleProvider) else "",
-            dev_login="dev" in providers,
+            dev_login=dev_allowed(request),
             github_login="github" in providers,
         ))
 
@@ -220,6 +229,7 @@ def create_app(settings: Settings | None = None, keys: AuthKeys | None = None,
         @app.post("/v1/auth/dev/login")
         async def dev_login(request: Request) -> Response:
             """Development only: sign in with a bare username, no browser."""
+            require_dev(request)
             await ratelimit.hit(redis, f"rl:oauth:{client_ip(request, settings)}", settings.oauth_per_minute, 60)
             body = await parse_body(request, pb.DevLoginRequest)
             user = body.username.strip()
@@ -229,8 +239,9 @@ def create_app(settings: Settings | None = None, keys: AuthKeys | None = None,
             return proto_response(await tokens.pair(uid))
 
         @app.get("/v1/auth/dev/authorize")
-        async def dev_authorize(state: str = Query(...), redirect_uri: str = Query(...), nonce: str = Query(...),
-                                user: str | None = Query(None)) -> Response:
+        async def dev_authorize(request: Request, state: str = Query(...), redirect_uri: str = Query(...),
+                                nonce: str = Query(...), user: str | None = Query(None)) -> Response:
+            require_dev(request)
             if redirect_uri not in settings.redirect_uris:
                 raise ApiError("INVALID_REQUEST", "Redirect URI is not registered")
             if not user:

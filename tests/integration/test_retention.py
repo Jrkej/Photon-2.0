@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import time
@@ -18,22 +17,27 @@ from photon.common.pb import photon_pb2 as pb
 from photon.imageserver import upload_state as U
 from photon.orchestrator import jobs
 from photon.orchestrator import keys as K
-from tests.conftest import Login, Stack, eventually, jpeg
+from tests.conftest import Login, Stack, announce_built, build, eventually, group, jpeg
 
 
 @pytest_asyncio.fixture(loop_scope="session")
 async def pair(login: Login) -> tuple[str, PhotonClient, PhotonClient]:
-    host, member = await login("host"), await login("member")
-    info = await host.create_session()
-    await member.join(code=info.join_code)
-    return info.session_id, host, member
+    sid, (host, member) = await group(login, "host", "member")  # both hold the session key
+    return sid, host, member
 
 
 async def store(c: PhotonClient, sid: str, seed: int) -> tuple[str, pb.CompleteResponse]:
-    data = jpeg(seed)
-    res = await upload_bytes(c, sid, data, "image/jpeg", clock.now_ms())
+    """Uploads an encrypted photo; returns its id (the hash of the encrypted file) and the complete answer."""
+    res = await upload_bytes(c, sid, jpeg(seed), "image/jpeg", clock.now_ms())
     assert res.outcome == "STORED" and res.response
-    return hashlib.sha256(data).hexdigest(), res.response
+    return res.sha256, res.response
+
+
+async def announce_new(c: PhotonClient, sid: str, seed: int) -> tuple[pb.AnnounceResponse, bytes]:
+    built = await build(c, sid, jpeg(seed))
+    ann = await announce_built(c, sid, built)
+    assert ann.result == pb.AnnounceResponse.UPLOAD
+    return ann, built.file
 
 
 def photo_dir(env: Stack, sid: str, sha: str) -> Path:
@@ -74,10 +78,11 @@ async def test_orchestrator_sweeper_deletes_after_expiry(pair: tuple[str, Photon
     assert int(await env.redis.hget(K.session(sid), "stored_bytes")) == 0
     shard = K.expiry(K.shard(sid, env.settings.expiry_shards))
     assert await env.redis.zcard(shard) == 0
-    # A late announce of an expired hash is not re-uploaded
-    data = jpeg(2)
-    ann = await host.announce(sid, hashlib.sha256(data).digest(), len(data), "image/jpeg", clock.now_ms())
-    assert ann.result == pb.AnnounceResponse.ALREADY_UPLOADED
+    # A late announce of an expired photo is not re-uploaded: neither the same file nor a rebuilt one (a new hash,
+    # the same photo tag)
+    rebuilt = await build(host, sid, jpeg(2))
+    assert rebuilt.sha_hex != sha
+    assert (await announce_built(host, sid, rebuilt)).result == pb.AnnounceResponse.ALREADY_UPLOADED
 
 
 async def test_image_server_sweeper_alone(pair: tuple[str, PhotonClient, PhotonClient], env: Stack) -> None:
@@ -153,14 +158,13 @@ async def test_orphan_rules(pair: tuple[str, PhotonClient, PhotonClient], env: S
     # A photo directory without meta.json, older than an hour
     orphan = root / "photos" / sid / ("f" * 64)
     orphan.mkdir(parents=True)
-    (orphan / "original").write_bytes(b"x")
+    (orphan / "file").write_bytes(b"x")
     old = time.time() - 2 * 3600
     os.utime(orphan, (old, old))
     # An abandoned upload whose lease is gone, and one protected by a pending report
     uploads = []
     for seed in (20, 21):
-        data = jpeg(seed)
-        ann = await member.announce(sid, hashlib.sha256(data).digest(), len(data), "image/jpeg", clock.now_ms())
+        ann, data = await announce_new(member, sid, seed)
         await member.put_chunk(ann.upload_url, ann.upload_token, 0, data, crc32c_b64(data))
         await env.redis.delete(K.lease(sid, ann.upload_id))
         uploads.append(ann.upload_id)
@@ -177,8 +181,7 @@ async def test_orphan_rules(pair: tuple[str, PhotonClient, PhotonClient], env: S
     assert (root / "tmp" / protected).exists()
     (root / "outbox" / f"{protected}.json").unlink()
     # tmp of an ended session goes on the next sweep
-    data = jpeg(22)
-    ann = await host.announce(sid, hashlib.sha256(data).digest(), len(data), "image/jpeg", clock.now_ms())
+    ann, data = await announce_new(host, sid, 22)
     await host.put_chunk(ann.upload_url, ann.upload_token, 0, data, crc32c_b64(data))
     await host.end(sid)
     await sweeper.sweep()
@@ -189,8 +192,8 @@ async def test_recount_fixes_drift_and_stale_reservations(pair: tuple[str, Photo
                                                           env: Stack) -> None:
     sid, host, member = pair
     await store(host, sid, 30)
-    data = jpeg(31)
-    ann = await member.announce(sid, hashlib.sha256(data).digest(), len(data), "image/jpeg", clock.now_ms())
+    built = await build(member, sid, jpeg(31))
+    ann = await announce_built(member, sid, built)
     good = await env.redis.hmget(K.session(sid), "stored_bytes", "reserved_bytes")
     await env.redis.hset(K.session(sid), mapping={"stored_bytes": 999_999, "reserved_bytes": 5})
     await jobs.recount(env.svc)
@@ -200,4 +203,5 @@ async def test_recount_fixes_drift_and_stale_reservations(pair: tuple[str, Photo
     clock.advance(61_000)
     await jobs.recount(env.svc)
     assert int(await env.redis.hget(K.session(sid), "reserved_bytes")) == 0
-    assert await env.redis.hget(K.photos(sid), hashlib.sha256(data).hexdigest()) is None
+    assert await env.redis.hget(K.photos(sid), built.sha_hex) is None
+    assert await env.redis.hget(K.session_keys(sid)[6], built.tag.hex()) is None  # its photo tag is free again

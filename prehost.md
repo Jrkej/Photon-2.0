@@ -8,7 +8,7 @@ How to run things is in [README.md](README.md), and what each file is for is in 
 
 | Tested here | Not tested yet |
 | --- | --- |
-| The backend: 149 automated tests, a load test (300 photos, all 1,200 deliveries), the Redis ACL file on a real Redis | The Docker image, docker-compose and the Caddyfile (no Docker access on the build machine) |
+| The backend: 189 automated tests (end-to-end encryption included), a load test (300 photos, all 1,200 deliveries), the Redis ACL file on a real Redis | The Docker image, docker-compose and the Caddyfile (no Docker access on the build machine) |
 | The Android app on one real phone: sign-in, sessions, camera uploads | HTTP/3, real FCM and APNs pushes, real Google sign-in, Redis failover |
 | The Android build and its unit tests; the iOS core library's 90 tests | The iOS app has never been compiled; the Android device tests haven't run |
 
@@ -20,14 +20,14 @@ The design picked defaults; confirm or change each in `deploy/.env` (every setti
 
 - [ ] Retention: photos are unavailable 30 minutes after storage and deleted within 5 minutes after that (`PHOTON_RETENTION_MS`)
 - [ ] Limits:
-  - 25 MB and 100 megapixels per photo; JPEG, PNG, WebP and HEIC only
+  - 25 MB per encrypted photo file (`PHOTON_MAX_PHOTO_BYTES`). The 100-megapixel limit and the type list (JPEG, PNG, WebP and HEIC) are enforced by the apps, because photos are end-to-end encrypted and the server can't see inside them ([e2ee.md](e2ee.md))
   - 1 GB per session
   - 10 members per session
   - 3 live uploads per user and 20 per session
   - 3 hash-mismatch strikes
 - [ ] Sessions end after 12 hours without activity. Join codes last 2 hours and invite links 12 hours
 - [ ] Location (GPS) is stripped from photos before upload, by default
-- [ ] Motion photos are accepted (data after the image is allowed)
+- [ ] Motion photos are accepted (data after the image is allowed; the apps check this, not the server)
 - [ ] Rate limits:
   - 20 announces a minute per user
   - 5 joins a minute per user and per IP
@@ -36,8 +36,8 @@ The design picked defaults; confirm or change each in `deploy/.env` (every setti
 
 ## 2. Legal and store policy
 
-- [ ] **Blocking:** a legal review of reporting and takedown for illegal content, as the design requires. Members can already report a photo; the reports land in the Postgres table `photo_reports`, and someone must watch it.
-- [ ] **Blocking:** a privacy policy and terms of use. Google sign-in and both app stores require a privacy policy URL. Cover what is shared, for how long, and that originals saved to members' galleries can't be recalled.
+- [ ] **Blocking:** a legal review of reporting and takedown for illegal content, as the design requires. Members can already report a photo; the reports land in the Postgres table `photo_reports`, and someone must watch it. Photos are end-to-end encrypted, so the server can't see a reported photo, and a report holds only the hash and the reason. The review must accept that, or the apps must attach the decrypted photo to a report (not built).
+- [ ] **Blocking:** a privacy policy and terms of use. Google sign-in and both app stores require a privacy policy URL. Cover what is shared, for how long, and that originals saved to members' galleries can't be recalled. Say what the server can see: photos are end-to-end encrypted, but membership, timing, file sizes and capture times are not (e2ee.md, section 10).
 - [ ] **Blocking for the stores: account deletion.** Google Play and the App Store require apps with accounts to offer deletion in the app and through a web link. **This isn't built yet.** Add an endpoint that deletes the user, their identities and devices, revokes their refresh tokens and leaves their session, plus a button in both apps.
 - [ ] **Play Console declarations** for the permissions the Android app uses:
   - the special-use foreground service (the justification text is already in the manifest);
@@ -51,7 +51,7 @@ The design picked defaults; confirm or change each in `deploy/.env` (every setti
   - `PHOTON_PUBLIC_HOST` (for example `photon.example.com`) serves the API, sign-in, invite links `/j/<token>` and `/.well-known/` (App Links, Universal Links).
   - `PHOTON_IMAGE_HOST` (for example `img.photon.example.com`) serves uploads and downloads.
 - [ ] **A Linux server** with Docker and the Compose plugin.
-  - CPU: verifying and thumbnailing take about 0.3 s of CPU per photo (8 cores is a reasonable start).
+  - CPU: the image server only hashes each upload and reads its 85-byte header; phones make the thumbnails before encrypting. Size the CPU for TLS and request load rather than image work.
   - Disk: the photo volume holds at most 30 minutes of photos, so size it for your peak. The temporary-upload budget is 2 GB (`PHOTON_TMP_DISK_BUDGET_BYTES`).
   - RAM: 8 GB or more.
 - [ ] **Firewall:** open 80/tcp, 443/tcp and **443/udp** (HTTP/3). Keep everything else closed; Redis, Postgres and the services are only on the internal Docker network.
@@ -147,6 +147,7 @@ Pushes are only wake-up hints, so PHOTON works without them.
 - [ ] **Postgres backups:** nothing backs Postgres up yet. Add a daily `pg_dump` to off-site storage, or use managed point-in-time recovery, and do one test restore. Accounts are the only long-lived data; Redis holds only short-lived session state (with AOF), and photos expire anyway.
 - [ ] **Redis failover is manual:** there is a replica but no Sentinel. Decide whether a manual promotion is acceptable, or add Sentinel. Implementation step 9.6 describes the recovery rules.
 - [ ] **Display names:** members are shown by user id. Consider exposing names before launch.
+- [ ] **iOS end-to-end encryption:** the iOS app doesn't implement [e2ee.md](e2ee.md) yet, so it can't create, join or upload in a session. Port it (and pass the test vectors in `tests/vectors/e2ee_v1.json`) before shipping iOS.
 
 ## 9. Staging run and verification
 

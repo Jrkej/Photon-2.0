@@ -1,0 +1,331 @@
+\section{Proposed System}\label{sec:proposed}
+
+\subsection{Overview}
+
+PHOTON is a client--server system with three server services, three data stores and native mobile clients. One rule shapes the whole design:
+
+\begin{pbox}{blue}{Design Rule}
+A photo is announced to the session only after the image server has recomputed its SHA-256 over the received bytes, found it equal to the hash the uploader claimed, and stored the file. Until then the photo does not exist for anyone else.
+\end{pbox}
+
+Each kind of state has exactly one writer. The \textbf{orchestrator} owns sessions, members, photo status and event fan-out, and never touches image bytes. The \textbf{image server} owns the bytes, thumbnails, previews and deletion, and never changes session state or talks to members; it only reports to the orchestrator. The \textbf{Auth} service owns the signing key and issues tokens, but is not in the path of every request, because the other services verify tokens locally with its public key. The \textbf{client} owns the gallery observer, the upload queue and its local record of received photos, but never decides on its own what counts as a duplicate.
+
+\subsection{System Architecture Block Diagram}
+
+Figure~\ref{fig:arch} shows the components and the protocols between them. All client traffic enters through one edge proxy, which terminates TLS 1.3 and offers HTTP/3 on UDP port 443 next to HTTP/2 on TCP port 443. The highlighted arrow is the only path by which a photo becomes visible: the image server's fenced report to the orchestrator.
+
+\begin{figure}[H]
+\centering
+\resizebox{\linewidth}{!}{\fig{arch}}
+\caption{System architecture block diagram}\label{fig:arch}
+\end{figure}
+
+
+\subsection{Steps of the Proposed System}\label{sec:steps}
+
+\begin{enumerate}[label=\textbf{Step \arabic*:}, leftmargin=*, align=left]
+  \item \textbf{Sign in.} The app signs in with Google (native ID token) or GitHub (browser, Authorization Code with PKCE) and receives a 15-minute access JWT and a rotating refresh token.
+  \item \textbf{Create or join.} The host creates a session and gets an 8-character code, an invite link and a QR code. Members join with any of them. One Lua script checks that the session is \texttt{ACTIVE}, not full, and that the user has no other live session.
+  \item \textbf{Connect.} The app opens the WebSocket \texttt{/v1/ws}, authenticates in the first frame, loads the snapshot and resumes the event stream from its cursor. It starts a foreground service that watches the gallery.
+  \item \textbf{Detect.} When the camera saves a photo, the observer records it in a local queue. A WorkManager job computes its SHA-256 and removes GPS data from a copy.
+  \item \textbf{Announce.} The app sends the hash and size. The orchestrator answers \texttt{UPLOAD} (with an upload token), \texttt{ALREADY\_UPLOADED} or \texttt{IN\_PROGRESS}.
+  \item \textbf{Upload.} The app sends 1\,MiB chunks, three at a time, each with a CRC32C, then calls \texttt{complete}. After a failure it asks which chunks arrived and sends only the rest.
+  \item \textbf{Verify.} The image server assembles the file, recomputes SHA-256, validates and decodes it in a sandboxed process, makes a thumbnail, and writes the metadata with \texttt{expires\_at = stored\_at + 30 min}.
+  \item \textbf{Report and announce.} The image server reports \texttt{stored} with the \texttt{upload\_id}. If the id is still the live one, the orchestrator marks the photo \texttt{STORED} and appends \texttt{PHOTO\_STORED} to the session's stream in the same script.
+  \item \textbf{Deliver.} Every member's WebSocket loop reads the new event and sends it; members without a socket get a push hint and catch up when they wake.
+  \item \textbf{Receive.} Each member fetches the thumbnail, then the preview, then the original, each with its own JWT, and saves only the original to the gallery.
+  \item \textbf{Expire, recall or end.} At \texttt{expires\_at} every download is refused and the file is deleted within 5 minutes. The uploader or host can recall a photo earlier, and the host can end the session, which deletes everything.
+\end{enumerate}
+
+\subsection{Life of a Photo}
+
+Figure~\ref{fig:seq} follows one photo through the system as a sequence diagram. Messages 1--3 are the control plane, 4--7 the data plane, 8--10 the internal plane, and 12--14 the event and data planes on the receiving side.
+
+\begin{figure}[H]
+\centering
+\resizebox{0.92\linewidth}{!}{\fig{seq}}
+\caption{Life of a photo: from announce to every member's gallery}\label{fig:seq}
+\end{figure}
+
+\subsection{Wire Protocol and API}
+
+\subsubsection{Endpoints}
+
+\begin{table}[H]
+\centering
+\small\stripes
+\begin{tabularx}{\linewidth}{L{6.4cm}L{1.9cm}Y}
+\headrow \hd{Endpoint} & \hd{Caller} & \hd{Purpose}\\
+\ep{POST /v1/auth/oauth/start}, \ep{/callback} & client & Browser sign-in with \texttt{state} and PKCE \\
+\ep{POST /v1/sessions}, \ep{/v1/sessions/join} & client & Create (code, invite link, QR), join by code or invite \\
+\ep{GET /v1/sessions/{sid}/snapshot} & client & Members, live photos, recalled hashes and a cursor \\
+\ep{WS /v1/ws} & client & Live events; first frame is \texttt{Hello} \\
+\ep{POST /v1/photos/announce} & client & \texttt{UPLOAD}, \texttt{ALREADY\_UPLOADED} or \texttt{IN\_PROGRESS} \\
+\ep{PUT /v1/uploads/{id}/chunks/{n}} & client & One chunk, with \texttt{X-Chunk-CRC32C} \\
+\ep{GET /v1/uploads/{id}} & client & Which chunks arrived, so an upload can resume \\
+\ep{POST /v1/uploads/{id}/complete} & client & Idempotent: 202 while verifying, then always the same result \\
+\ep{GET /v1/sessions/{sid}/photos/{hash}?size=} & client & \texttt{thumb}, \texttt{preview} or \texttt{full}; checked on every request \\
+\ep{POST /internal/v1/photos/stored}, \ep{/rejected} & image server & Fenced report carrying the \texttt{upload\_id} \\
+\ep{DELETE /internal/v1/photos/{sid}/{hash}} & orchestrator & Delete after expiry, recall or end; retried until acknowledged \\
+\end{tabularx}
+\caption{Main endpoints (all bodies are protobuf)}\label{tab:endpoints}
+\end{table}
+
+\subsubsection{Messages}
+
+All messages are defined once in \texttt{proto/photon.proto} and shared by the Python services, the Kotlin app and the Swift library. Field numbers are never reused, so old and new clients can talk to the same server. The core messages are:
+
+\begin{lstlisting}[language=C]
+message AnnounceRequest {
+  bytes sha256 = 1;  uint64 size = 2;  string mime = 3;
+  int64 taken_at_ms = 4;  string session_id = 5;
+}
+message AnnounceResponse {
+  enum Result { UPLOAD = 0; ALREADY_UPLOADED = 1; IN_PROGRESS = 2; }
+  Result result = 1;  string upload_id = 2;  string upload_url = 3;
+  string upload_token = 4;  uint32 chunk_size_hint = 5;
+}
+message PhotoEvent {
+  enum Type { PHOTO_STORED = 0; PHOTO_RECALLED = 1; MEMBER_JOINED = 2;
+              MEMBER_LEFT = 3; SESSION_ENDED = 4; HOST_CHANGED = 5; }
+  string event_id = 1;  Type type = 2;  string session_id = 3;  bytes sha256 = 4;
+  string uploader_id = 5;  uint64 size = 6;  int64 taken_at_ms = 7;
+  int64 expires_at_ms = 8;  string member_id = 9;
+}
+message Error {
+  string code = 1;  string message = 2;  bool retryable = 3;
+  uint32 retry_after_s = 4;  repeated uint32 missing_chunks = 5;
+}
+\end{lstlisting}
+
+A \texttt{PhotoEvent} carries no download link. Receivers fetch by hash with their own JWT, so a leaked event is useless on its own.
+
+\subsubsection{Error Contract}
+
+Every error has one status code, one machine-readable code and one client action (Table~\ref{tab:errors}). The client retries only when \texttt{retryable} is true and waits \texttt{retry\_after\_s} when it is set.
+
+\begin{table}[H]
+\centering
+\small\stripes
+\begin{tabularx}{\linewidth}{C{1.0cm}L{6.2cm}Y}
+\headrow \hd{Status} & \hd{Codes} & \hd{Client action}\\
+400 & \texttt{INVALID\_REQUEST} (lists missing chunks) & Fix the request; send the missing chunks \\
+401 & \texttt{TOKEN\_EXPIRED}, \texttt{UNAUTHENTICATED} & Refresh once, then retry \\
+403 & \texttt{NOT\_A\_MEMBER}, \texttt{FORBIDDEN} & Stop; rejoin if the session still exists \\
+404 & \texttt{UNKNOWN\_UPLOAD}, \texttt{PHOTO\_NOT\_FOUND}, \texttt{SESSION\_NOT\_FOUND} & Drop the task; non-members get 404 so existence is not leaked \\
+409 & \texttt{ALREADY\_IN\_SESSION}, \texttt{UPLOAD\_SUPERSEDED}, \texttt{UPLOAD\_FINALIZED} & Stop this upload \\
+410 & \texttt{SESSION\_ENDED}, \texttt{PHOTO\_EXPIRED}, \texttt{PHOTO\_RECALLED}, \texttt{RESYNC\_REQUIRED} & Final: clear local state, or load the snapshot \\
+413 / 415 & \texttt{TOO\_LARGE}, \texttt{UNSUPPORTED\_FORMAT} & Stop; do not retry \\
+422 & \texttt{HASH\_MISMATCH}, \texttt{INVALID\_IMAGE} & Stop; counts as a strike (3 strikes block uploads) \\
+429 & \texttt{RATE\_LIMITED}, \texttt{TOO\_MANY\_UPLOADS}, \texttt{QUOTA\_EXCEEDED} & Retry after \texttt{Retry-After} \\
+503 & \texttt{BUSY}, \texttt{PROCESSING\_FAILED} & Retry with backoff and jitter (Equation~\ref{eq:backoff}) \\
+\end{tabularx}
+\caption{Error contract}\label{tab:errors}
+\end{table}
+
+\subsubsection{WebSocket Protocol}
+
+The WebSocket carries binary protobuf frames. The client's first frame must be \texttt{Hello} with its access token, session id and last event id; the token is never put in the URL, where proxies would log it. The server answers with \texttt{ready\_cursor}, then sends \texttt{PhotoEvent} frames, and answers each \texttt{ping} with a \texttt{pong}. The server closes the socket with an application close code that tells the client what to do next (Table~\ref{tab:close}).
+
+\begin{table}[H]
+\centering
+\small\stripes
+\begin{tabularx}{\linewidth}{C{1.2cm}L{4.2cm}Y}
+\headrow \hd{Code} & \hd{Meaning} & \hd{Client action}\\
+4001 & \texttt{TOKEN\_EXPIRED} (sent when the JWT expires) & Refresh the token, reconnect from the last event id \\
+4400 & \texttt{INVALID\_REQUEST} (no \texttt{Hello} in time) & Fix the client; reconnect \\
+4401 & \texttt{UNAUTHENTICATED} & Sign in again \\
+4403 & \texttt{NOT\_A\_MEMBER} & Leave the session screen; rejoin if allowed \\
+4409 & \texttt{RESYNC\_REQUIRED} & Load the snapshot, continue from its cursor \\
+4410 & \texttt{SESSION\_ENDED} & Stop syncing \\
+1011 & Server error & Reconnect with backoff \\
+\end{tabularx}
+\caption{WebSocket close codes}\label{tab:close}
+\end{table}
+
+\subsection{Data Model}
+
+Session state is short-lived by design and lives in Redis; accounts must survive a restart and live in Postgres (Figure~\ref{fig:er}). Every key of one session contains the hash tag \texttt{\{sid\}}, so all of them fall into the same Redis Cluster slot and one script can update them atomically. The event stream's ids are \texttt{<milliseconds>-<sequence>} from the shared clock, so they increase within a session and double as the client's cursor.
+
+\begin{figure}[H]
+\centering
+\resizebox{0.9\linewidth}{!}{\fig{er}}
+\caption{Data model: Redis keys for session state and Postgres tables for accounts}\label{fig:er}
+\end{figure}
+
+\subsection{State Machines}
+
+A photo's status in the session moves through the states of Figure~\ref{fig:photofsm}. Every transition is one Lua function that also checks that the session is \texttt{ACTIVE}, so nothing can succeed after the session ends. \texttt{EXPIRED} and \texttt{RECALLED} stay as tombstones until the session ends, so a late announce of the same photo does not upload it again.
+
+\begin{figure}[H]
+\centering
+\resizebox{0.85\linewidth}{!}{\fig{photofsm}}
+\caption{Photo status state machine (Redis)}\label{fig:photofsm}
+\end{figure}
+
+Inside the image server, each upload has its own state (\texttt{RECEIVING}, \texttt{VERIFYING}, \texttt{VERIFIED}, \texttt{REPORTING}, then \texttt{STORED}, \texttt{REJECTED}, \texttt{SUPERSEDED} or \texttt{ENDED}), written to disk before every reply. A repeated \texttt{complete} after a timeout therefore returns the stored result instead of processing the photo again.
+
+\subsection{Algorithms}
+
+\subsubsection{Atomic Announce with Quota Reservation}\label{sec:alg-announce}
+
+Announce decides, in one atomic step, whether the photo must be uploaded. Because Redis runs a function to completion before any other command, two members announcing the same photo at the same instant cannot both get \texttt{UPLOAD}, and concurrent announces cannot jointly exceed the quota.
+
+\begin{pbox}{blue}{Algorithm 1: announce (Redis function, one atomic step)}
+\textbf{Input:} session $s$, user $u$, hash $h$, size $n$, fresh id $id$.\par
+\textbf{Step 1:} if $s$ is not \texttt{ACTIVE} $\Rightarrow$ \texttt{410 SESSION\_ENDED}; if $u$ is not a member $\Rightarrow$ \texttt{403}; if $u$ has 3 strikes $\Rightarrow$ \texttt{403}.\par
+\textbf{Step 2:} if $h$ is \texttt{STORED} or \texttt{EXPIRED} $\Rightarrow$ \texttt{ALREADY\_UPLOADED}; if \texttt{RECALLED} $\Rightarrow$ \texttt{410}.\par
+\textbf{Step 3:} if $h$ is \texttt{UPLOADING} and its lease exists: same uploader $\Rightarrow$ \texttt{UPLOAD} with the \emph{same} id and a fresh token; otherwise \texttt{IN\_PROGRESS}. If the lease is gone and the reservation is older than 60\,s, release it (\emph{takeover}).\par
+\textbf{Step 4:} count live reservations (releasing stale ones); if $u$ has 3 or the session 20 $\Rightarrow$ \texttt{429 TOO\_MANY\_UPLOADS}.\par
+\textbf{Step 5:} if $B_\text{stored} + B_\text{reserved} + n > C$ $\Rightarrow$ \texttt{429 QUOTA\_EXCEEDED}.\par
+\textbf{Step 6:} \texttt{HSETNX} $h \to$ \{\texttt{UPLOADING}, $u$, $id$\}; $B_\text{reserved} \mathrel{+}= n$; create lease \texttt{upload:\{s\}:$id$} with a 15-minute TTL; return \texttt{UPLOAD}, $id$.
+\end{pbox}
+
+The quota invariant that Step 5 maintains, for a session cap $C$ (1\,GB by default), is
+\begin{equation}\label{eq:quota}
+  B_\text{stored} + B_\text{reserved} \le C,
+\end{equation}
+where $B_\text{reserved}$ moves to $B_\text{stored}$ when the photo is stored and is released exactly once when the reservation ends in any other way (rejection, stale lease, takeover or session end). A job recomputes both counters every 5 minutes from the photos hash and corrects any drift.
+
+\subsubsection{Fenced Report}
+
+The image server's report is the only way a photo becomes \texttt{STORED}. It names the \texttt{upload\_id}, which acts as a fencing token.
+
+\begin{pbox}{blue}{Algorithm 2: report\_stored (Redis function)}
+\textbf{Input:} session $s$, hash $h$, upload id $id$, \texttt{stored\_at}, \texttt{expires\_at}.\par
+\textbf{Step 1:} if $s$ is not \texttt{ACTIVE} $\Rightarrow$ \texttt{410}; the image server deletes this upload's files.\par
+\textbf{Step 2:} if the entry for $h$ is missing or its id $\neq id$ $\Rightarrow$ \texttt{409 UPLOAD\_SUPERSEDED} (fenced out); files of $id$ are deleted.\par
+\textbf{Step 3:} if the entry is no longer \texttt{UPLOADING} $\Rightarrow$ \texttt{200 NOOP} (duplicate report).\par
+\textbf{Step 4:} if the uploader has left $\Rightarrow$ release the reservation, \texttt{409}.\par
+\textbf{Step 5:} mark \texttt{STORED}, move $n$ bytes from reserved to stored, delete the lease, and \texttt{XADD} a \texttt{PHOTO\_STORED} event, all in the same step; return \texttt{APPLIED}.
+\end{pbox}
+
+Because the event is appended in the same atomic step as the status change, a photo is \texttt{STORED} exactly when its event exists: there is no moment where one is visible without the other.
+
+\subsubsection{Resumable Chunked Upload}\label{sec:alg-upload}
+
+The upload works like the selective-repeat protocol of the transport layer, one level higher (Figure~\ref{fig:chunks}). Each chunk is an independent, idempotent \texttt{PUT} that carries its index and its CRC32C. The server stores chunks by index, so a repeated chunk overwrites itself. After a failure the client asks \texttt{GET /v1/uploads/\{id\}} which chunks arrived and sends only the others.
+
+\begin{figure}[H]
+\centering
+\resizebox{0.92\linewidth}{!}{\fig{chunks}}
+\caption{Resumable chunked upload: only lost chunks are sent again}\label{fig:chunks}
+\end{figure}
+
+The Android client sizes chunks from the throughput $\hat{B}$ it measured on earlier uploads, aiming at about two seconds of transfer per chunk:
+\begin{equation}\label{eq:chunk}
+  c = \max\!\left(\operatorname{clamp}\!\left(\hat{B}\cdot 2\ \text{s},\ 256\ \text{KiB},\ 8\ \text{MiB}\right),\ \left\lceil \tfrac{S}{4096} \right\rceil\right),
+\end{equation}
+rounded to 64\,KiB, where $S$ is the photo size. Without a measurement it uses the server's hint of 1\,MiB. Larger chunks mean fewer requests on a fast link; smaller chunks lose less work when a slow link fails. Each chunk is retried up to 3 times with the backoff of Equation~\ref{eq:backoff}; after that the photo stays in a persistent queue and resumes when the network returns.
+
+\subsubsection{Gap-Free Event Delivery}
+
+A common way to build live updates is to replay missed events from a database and then subscribe to a live channel. Any event published between the end of the replay and the start of the subscription is lost (Figure~\ref{fig:eventloop}, middle row). PHOTON avoids the gap by reading backlog and live events from the same source in one loop.
+
+\begin{figure}[H]
+\centering
+\resizebox{0.92\linewidth}{!}{\fig{eventloop}}
+\caption{Replay-then-subscribe loses events; one XREAD loop from the cursor does not}\label{fig:eventloop}
+\end{figure}
+
+\begin{pbox}{blue}{Algorithm 3: event loop for one WebSocket}
+\textbf{Step 1:} read \texttt{Hello}; verify the JWT; check membership; let $c \leftarrow$ \texttt{last\_event\_id} (or the newest id for a new client).\par
+\textbf{Step 2:} if $c$ is older than the oldest retained entry, or newer than the newest $\Rightarrow$ close \texttt{4409 RESYNC\_REQUIRED}.\par
+\textbf{Step 3:} send \texttt{ready\_cursor}; then loop: \texttt{XREAD BLOCK 15000 STREAMS session:\{s\}:events $c$}.\par
+\textbf{Step 4:} for each entry $(id, e)$: send $e$; $c \leftarrow id$. On \texttt{SESSION\_ENDED} close \texttt{4410}.\par
+\textbf{Step 5:} in parallel, answer pings, and close \texttt{4001} when the JWT expires; the client refreshes and reconnects from $c$.
+\end{pbox}
+
+On resync, and on every first join, the client loads the snapshot. The server reads the cursor \emph{before} the state, so any photo stored after the cursor is also delivered as an event; the client simply drops the duplicate.
+
+\subsubsection{Client Deduplication: Exactly-Once Effect}
+
+Delivery is at-least-once: after a reconnect the same event may arrive again, and a photo may arrive both in a snapshot and as an event. The client makes the \emph{effect} exactly-once with two checks:
+\begin{equation}\label{eq:dedupe}
+  \text{process}(e) \iff \text{id}(e) > c_\text{max} \ \wedge\ \text{sha256}(e) \notin H_\text{local},
+\end{equation}
+where $c_\text{max}$ is the highest event id already processed and $H_\text{local}$ is the set of hashes already received or uploaded. Stream ids increase within a session, so the first check also discards anything older than the cursor.
+
+\subsubsection{Refresh-Token Rotation with a Grace Window}
+
+Refresh tokens are random, stored only as hashes, and rotated on every use. Reusing an old token normally means it was stolen, so the whole token family is revoked. Phones, however, legitimately send the same refresh twice when a response is lost. PHOTON allows a 30-second grace window: a token rotated less than 30\,s ago that is presented again gets a new pair in the same family instead of revoking it. Outside the window, reuse revokes the family. The client also sends at most one refresh at a time (single-flight).
+
+\subsubsection{Retention with Two Sweepers}
+
+Retention has two separate guarantees (Figure~\ref{fig:retention}). \emph{Logical} expiry is exact: from \texttt{expires\_at} no download succeeds, because both the orchestrator's status and the image server's own metadata are checked on every request. \emph{Physical} deletion is bounded: two independent sweepers delete the file within 5 minutes, and an alert fires at 15 minutes. The image server's sweeper works only from its local metadata files, so even if Redis loses its state, files are still deleted on time.
+
+\begin{figure}[H]
+\centering
+\resizebox{0.92\linewidth}{!}{\fig{retention}}
+\caption{Retention: exact logical expiry and bounded physical deletion}\label{fig:retention}
+\end{figure}
+
+\subsection{Novelty and Innovation}\label{sec:novelty}
+
+The six ideas below are what distinguish PHOTON from existing photo-sharing tools. Each is described with its core idea, why it is new for this application, and how it works.
+
+\subsubsection{N1: Verify-Before-Announce with Content-Addressed Dedupe}
+
+\begin{pbox}{blue}{Core Idea}
+A photo is identified by the SHA-256 of its bytes, uploaded at most once per session, and announced only after the image server has recomputed that hash itself. The client's hash is treated as a claim, never as a fact.
+\end{pbox}
+
+\textbf{Why this is novel.} Deduplication by client-supplied hash is a known optimisation, but it opens an attack: a member announces the hash of someone else's photo with different bytes, and every later upload of the real photo is answered ``already uploaded''. PHOTON makes the server the only judge of the hash and ties the announcement to that judgement, so dedupe and integrity come from the same check. A mismatch is rejected (\texttt{422 HASH\_MISMATCH}), counts as a strike, and three strikes block the member's uploads.
+
+\textbf{How it works.} The upload token names the claimed hash and size. The image server streams SHA-256 over the chunks while assembling them (1.8\,GB/s on one core in our measurement), compares the result with the token, validates and decodes the image in a sandboxed subprocess, and only then sends the fenced \texttt{stored} report that makes the photo visible.
+
+\subsubsection{N2: Fencing Tokens on Every Cross-Service Message}
+
+\begin{pbox}{blue}{Core Idea}
+Every message that changes upload state names its \texttt{upload\_id}, and is applied only if that id is still the live reservation for the photo. A delayed message from a stalled uploader can never clear or revive a newer upload.
+\end{pbox}
+
+\textbf{Why this is novel.} Mobile uploads stall for minutes and resume later; servers restart; reports are retried. Without fencing, a late \texttt{rejected} from an abandoned attempt would delete a newer attempt's reservation, and a late \texttt{stored} could revive a cancelled one. PHOTON applies the fencing-token pattern from distributed locking to a mobile upload pipeline, together with leases and on-disk outboxes, so that every step is idempotent and resumable.
+
+\textbf{How it works.} Figure~\ref{fig:fencing} shows uploader A stalling, its lease expiring and uploader B taking over with a new id. When A's report finally arrives it carries \texttt{u1}, which no longer matches, so it is answered \texttt{409 UPLOAD\_SUPERSEDED} and the image server deletes exactly A's files. All temporary paths contain the \texttt{upload\_id}, so the cleanup cannot touch B's files.
+
+\begin{figure}[H]
+\centering
+\resizebox{0.88\linewidth}{!}{\fig{fencing}}
+\caption{Fencing by \texttt{upload\_id}: a late report from a stalled uploader is rejected}\label{fig:fencing}
+\end{figure}
+
+\subsubsection{N3: One Read Loop for Backlog and Live Events}
+
+\begin{pbox}{blue}{Core Idea}
+Each WebSocket reads the session's Redis Stream with \texttt{XREAD} starting after the client's cursor and keeps reading in the same loop. Backlog and live events come from one source, so there is no window in which an event can be missed.
+\end{pbox}
+
+\textbf{Why this is novel.} Most real-time designs combine a history query with a separate pub/sub subscription and must handle the race between them. Using the durable stream itself as the live channel removes the race. The stream is trimmed by age to the retention window plus one hour, and a client whose cursor is outside the retained range receives \texttt{RESYNC\_REQUIRED}, so even a client that was offline for a day recovers completely from the snapshot. Push notifications are demoted to a hint: on any push, and on every app start, the client runs the same catch-up.
+
+\textbf{How it works.} See Algorithm~3 and Figure~\ref{fig:eventloop}. In the tests, 1{,}200 events were delivered exactly once and in order across random disconnections, and 3{,}060 of 3{,}060 events reached 153 sockets.
+
+\subsubsection{N4: A Transport-Aware Data Plane}
+
+\begin{pbox}{blue}{Core Idea}
+Photo bytes travel over HTTP/3 (QUIC on UDP 443), fall back to HTTP/2 on TCP automatically through \texttt{Alt-Svc}, and are sent as small, checksummed, resumable chunks whose size adapts to the measured throughput.
+\end{pbox}
+
+\textbf{Why this is novel.} Consumer photo-sharing apps usually upload a photo in one request and restart it after a failure. PHOTON combines three transport-level techniques: QUIC's connection migration for network changes, per-chunk CRC32C with selective retransmission for loss, and throughput-based chunk sizing (Equation~\ref{eq:chunk}) for links from 2G to Wi-Fi. A failed transfer costs at most one chunk, not the whole photo.
+
+\textbf{How it works.} Caddy terminates QUIC and TLS 1.3 at the edge; the Android app uses Cronet, which speaks HTTP/3 and falls back on its own. Each chunk carries \texttt{X-Chunk-CRC32C}; the server rejects a corrupted chunk and the client resends just that chunk.
+
+\subsubsection{N5: Ephemeral by Design, with Per-Request Authorisation}
+
+\begin{pbox}{blue}{Core Idea}
+There are no shareable links. Every download is authorised again, on every request, by JWT, session membership, photo status and \texttt{expires\_at}, and two independent sweepers delete each file within 5 minutes of expiry.
+\end{pbox}
+
+\textbf{Why this is novel.} Cloud albums keep photos until a user deletes them, and many sharing tools hand out bearer links that keep working once leaked. PHOTON treats the server copy as a transit buffer: logical expiry is exact, physical deletion is bounded and monitored, responses carry \texttt{Cache-Control: private, no-store} so no shared cache keeps a copy, and the image server refuses to serve a file past its own \texttt{expires\_at} even if Redis state is stale.
+
+\textbf{How it works.} See Figure~\ref{fig:retention}. Recall and session end use the same deletion path with \texttt{expires\_at} set to now.
+
+\subsubsection{N6: Background Capture Pipeline with Layered Echo Prevention}
+
+\begin{pbox}{blue}{Core Idea}
+On Android, a foreground service and a content-URI WorkManager trigger notice new camera photos even when the app is in the background or its process was killed; a received photo saved to the gallery is recognised by five independent checks so it is never uploaded back.
+\end{pbox}
+
+\textbf{Why this is novel.} Saving a received photo fires the same gallery observer as taking one, and the operating system may re-encode the saved copy, so its hash differs. A naive app would upload every received photo back to the session, which would echo it to everyone again. PHOTON checks, in order: the asset id recorded when the photo was saved, the dedicated PHOTON folder, the owner package, a local hash set, and finally the server's session-wide dedupe.
+
+\textbf{How it works.} On a real phone (Motorola edge 70 fusion, Android 16), a test photo taken with PHOTON in the background was stored in 2.1\,s, 1.8\,s after the app's process had been killed, and sync resumed by itself after an app update (Section~\ref{sec:device}).

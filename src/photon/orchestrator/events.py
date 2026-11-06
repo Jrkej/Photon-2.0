@@ -31,6 +31,12 @@ def entry_to_event(sid: str, entry_id: str, raw: Any) -> pb.PhotoEvent:
         ev.expires_at_ms = int(float(f["ex"]))
     if "m" in f:
         ev.member_id = f["m"]
+    if f.get("pk"):
+        ev.member_key = bytes.fromhex(f["pk"])
+    if f.get("tg"):
+        ev.photo_tag = bytes.fromhex(f["tg"])
+    if "ke" in f:
+        ev.key_epoch = int(float(f["ke"]))
     return ev
 
 

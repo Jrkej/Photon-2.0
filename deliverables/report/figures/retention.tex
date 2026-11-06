@@ -1,0 +1,20 @@
+% Retention: exact logical expiry, bounded physical deletion, two sweepers
+\begin{tikzpicture}[x=1cm,y=1cm]
+\fill[greenfill] (0,0) rectangle (8,0.8);
+\fill[yellowfill] (8,0) rectangle (10,0.8);
+\fill[redfill] (10,0) rectangle (14,0.8);
+\draw[grayline] (0,0) rectangle (14,0.8);
+\node[font=\scriptsize] at (4,0.4) {downloadable by members (JWT + membership + STORED)};
+\node[font=\scriptsize, align=center] at (9,0.4) {deletion\\target};
+\node[font=\scriptsize, align=center] at (12,0.4) {file still on disk:\\alert at +15 min};
+\foreach \x in {0,8,10,14} \draw[navy, line width=0.8pt] (\x,-0.1) -- (\x,0.9);
+\node[font=\scriptsize, anchor=north west] at (0,-0.1) {stored\_at};
+\node[font=\scriptsize, anchor=north east] at (8,-0.1) {expires\_at = stored\_at + 30 min};
+\node[font=\scriptsize, anchor=north west] at (10,-0.1) {+5 min};
+\node[font=\scriptsize, anchor=north east] at (14,-0.1) {+15 min};
+\node[font=\scriptsize\bfseries, text=redtab, anchor=south] at (8,0.9) {logical expiry is exact: every download refused};
+\node[blk, font=\scriptsize, align=left, text width=62mm, anchor=north west] (o) at (0,-1.0) {\textbf{Orchestrator sweeper} (every 60 s, 16 shards, Redis lock): \texttt{expire\_photo} marks EXPIRED, frees quota, calls DELETE and keeps the entry until the image server acknowledges};
+\node[blk, font=\scriptsize, align=left, text width=62mm, anchor=north east] (i) at (14,-1.0) {\textbf{Image server sweeper} (every 60 s, local metadata only): deletes any file past its own expires\_at, orphans without metadata after 1 h, temporary directories whose lease is gone};
+\draw[dsh] (o.north) -- ++(0,0.3) -| (8.6,-0.05);
+\draw[dsh] (i.north) -- ++(0,0.3) -| (9.4,-0.05);
+\end{tikzpicture}

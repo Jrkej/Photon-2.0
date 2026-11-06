@@ -1,0 +1,16 @@
+% Photo status state machine in session:{sid}:photos
+\begin{tikzpicture}[node distance=21mm]
+\node[ext, st] (none) {absent};
+\node[warn, st, right=of none] (up) {UPLOADING};
+\node[cli, st, right=of up] (sto) {STORED};
+\node[ext, st, right=of sto] (exp) {EXPIRED};
+\node[bad, st, below=12mm of sto] (rec) {RECALLED};
+\node[pur, st, below=12mm of exp] (end) {ENDED\\\scriptsize tombstone};
+\draw[arr] (none) -- node[lblc, above]{announce\\\scriptsize reserve bytes} (up);
+\draw[arr] (up) -- node[lblc, above]{report\_stored\\\scriptsize id matches} (sto);
+\draw[arr] (sto) -- node[lblc, above]{sweeper\\\scriptsize at expires\_at} (exp);
+\draw[arr] (sto) -- node[lblc, right]{recall\\\scriptsize uploader or host} (rec);
+\draw[arr] (up.south west) to[bend left=35] node[lblc, below]{rejected, lease stale, takeover\\\scriptsize releases reserved bytes} (none.south east);
+\draw[dsh] (exp) -- node[lblc, right]{session end} (end);
+\draw[dsh] (rec) -- (end);
+\end{tikzpicture}

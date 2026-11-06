@@ -1,0 +1,18 @@
+% Fencing by upload_id: a slow uploader cannot clear a newer reservation
+\begin{tikzpicture}[x=1cm,y=1cm]
+\node[font=\small\bfseries, anchor=east] at (0,0) {Uploader A};
+\node[font=\small\bfseries, anchor=east] at (0,-1.4) {Orchestrator};
+\node[font=\small\bfseries, anchor=east] at (0,-2.8) {Uploader B};
+\foreach \y in {0,-1.4,-2.8} \draw[lifeline] (0.2,\y) -- (14.8,\y);
+\draw[msg] (0.6,0) -- node[lblc, left, pos=0.5]{announce} (1.4,-1.4);
+\draw[rmsg] (1.6,-1.4) -- node[lblc, right, pos=0.4]{u1} (2.4,0);
+\node[bad, font=\scriptsize, minimum height=6mm] at (4.3,0) {stalls (no network)};
+\node[warn, font=\scriptsize, minimum height=6mm, align=center] at (5.4,-1.4) {lease u1 expires\\(15 min idle)};
+\draw[msg] (6.6,-2.8) -- node[lblc, left, pos=0.5]{announce} (7.4,-1.4);
+\draw[rmsg] (7.6,-1.4) -- node[lblc, right, pos=0.5]{takeover: u2} (8.4,-2.8);
+\node[cli, font=\scriptsize, minimum height=6mm] at (9.4,-2.8) {uploads chunks};
+\draw[msg] (10.5,-2.8) -- node[lblc, left, pos=0.5]{stored(u2)} (11.1,-1.4);
+\node[cli, font=\scriptsize, minimum height=6mm, align=center] at (11.1,-0.7) {applied:\\STORED};
+\draw[msg, draw=redtab] (12.6,0) -- node[lblc, right, pos=0.35, text=redtab]{late stored(u1)} (13.2,-1.4);
+\node[bad, font=\scriptsize, minimum height=6mm, align=center, anchor=north] at (13.4,-1.7) {409 UPLOAD\_SUPERSEDED\\u1 files deleted};
+\end{tikzpicture}

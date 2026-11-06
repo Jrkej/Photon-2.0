@@ -16,6 +16,7 @@ def mint(
     taken_at_ms: int,
     uploader: str,
     upload_id: str,
+    key_epoch: int,
 ) -> str:
     now_s = clock.now_ms() // 1000
     return jwtutil.sign(
@@ -31,6 +32,7 @@ def mint(
             "taken_at_ms": taken_at_ms,
             "uploader": uploader,
             "upload_id": upload_id,
+            "key_epoch": key_epoch,  # the image server checks the file header names this epoch
         },
         key,
     )

@@ -1,0 +1,27 @@
+% Deployment and network topology (docker compose, one host)
+\begin{tikzpicture}[x=1cm,y=1cm]
+\node[cli, minimum width=26mm] (inet) at (0,0) {Phones on the\\Internet};
+\node[edgeb, minimum width=34mm, align=center] (cd) at (4.6,0) {\textbf{Caddy} 172.30.0.10\\\scriptsize 443/tcp, 443/udp, 80/tcp};
+\draw[darr] (inet) -- node[lbl]{TLS 1.3} (cd);
+\node[blk, minimum width=24mm] (a1) at (9.2,1.3) {auth:8082 $\times 2$};
+\node[blk, minimum width=24mm] (o1) at (9.2,0) {orchestrator:8080 $\times 2$};
+\node[blk, minimum width=24mm] (i1) at (9.2,-1.3) {imageserver:8081};
+\draw[arr] (cd.east) -- node[lbl, pos=0.6]{round robin} (a1.west);
+\draw[arr] (cd.east) -- node[lbl, pos=0.6]{least conn} (o1.west);
+\draw[arr] (cd.east) -- node[lbl, pos=0.6]{9 MB cap} (i1.west);
+\node[store, minimum width=24mm] (r) at (13.3,1.0) {redis:6379\\\scriptsize TLS, ACL users};
+\node[store, minimum width=24mm] (rr) at (13.3,-0.75) {redis-replica\\\scriptsize async};
+\node[store, minimum width=24mm] (pg) at (13.3,-2.5) {postgres:5432};
+\draw[arr] (a1.east) -- (r.west);
+\draw[arr] (o1.east) -- (r.west);
+\draw[dsh] (i1.east) -- (r.west);
+\draw[arr] (r.south) -- (rr.north);
+\draw[arr] (o1.east) -- (pg.west);
+\draw[arr] (a1.east) -- (pg.west);
+\node[ext, minimum width=26mm] (pm) at (4.6,-2.5) {prometheus:9090\\\scriptsize scrapes /metrics};
+\draw[dsh] (pm.east) -- (i1.west);
+\node[bad, font=\scriptsize, align=left, anchor=north] at (4.6,1.95) {/internal/*, /metrics, /readyz $\to$ 404 at the edge};
+\begin{scope}[on background layer]
+\node[zone, fit=(cd)(a1)(pg)(pm)(r), label={[zonet, anchor=south east]north east:docker network ``backend'' (private)}] {};
+\end{scope}
+\end{tikzpicture}

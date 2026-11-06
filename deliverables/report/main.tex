@@ -1,0 +1,161 @@
+% PHOTON: Live Photo Sync for Groups over Unreliable Mobile Networks
+% Computer Networks (CSC-303) project report.
+%
+% Build: latexmk -pdf main.tex        (or ./build.sh in the parent folder, which also builds the Word report)
+% Team details (group number, names, contacts, contributions) live in team.tex, generated from ../team.json.
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{mathptmx}                 % Times (Times New Roman metrics) for text and math
+\renewcommand{\ttdefault}{lmtt}       % Latin Modern typewriter for code
+\usepackage[margin=1in, headheight=22pt]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{pifont}
+\usepackage{graphicx}
+\usepackage[table]{xcolor}
+\input{figstyle}                      % colours, TikZ styles and pgfplots (shared with the figure renderer)
+\usepackage{array,tabularx,booktabs,colortbl}
+\usepackage{enumitem}
+\usepackage{float}
+\usepackage[section]{placeins}        % floats stay inside their section
+\usepackage[most]{tcolorbox}
+\usepackage{listings}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage[font=small, labelsep=colon, skip=6pt]{caption}
+\usepackage[hyphens,obeyspaces,spaces]{url}
+\usepackage{needspace}
+\usepackage{tocloft}
+\renewcommand{\cftsecfont}{\bfseries\color{navy}}\renewcommand{\cftsecpagefont}{\bfseries}
+\renewcommand{\cftsubsecfont}{\color{headblue}}
+\setlength{\cftbeforesecskip}{5pt}\setlength{\cftbeforesubsecskip}{0.5pt}
+\renewcommand{\cfttoctitlefont}{\color{headblue}\large\bfseries}
+\setlength{\cftbeforetoctitleskip}{0pt}\setlength{\cftaftertoctitleskip}{8pt}
+\renewcommand{\floatpagefraction}{0.75}\renewcommand{\topfraction}{0.85}\renewcommand{\bottomfraction}{0.6}\renewcommand{\textfraction}{0.12}
+\usepackage[colorlinks=true, linkcolor=headblue, urlcolor=pblue, citecolor=headblue, pdfborder={0 0 0}]{hyperref}
+\hypersetup{pdftitle={PHOTON: Live Photo Sync for Groups over Unreliable Mobile Networks}, pdfsubject={Computer Networks (CSC-303) project report}}
+
+\input{team}
+
+% ---------------------------------------------------------------- layout
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{5pt plus 2pt}
+\setlist{itemsep=2pt, topsep=3pt, parsep=1pt}
+\renewcommand{\arraystretch}{1.2}
+\setlength{\intextsep}{8pt plus 2pt minus 2pt}  % space around figures and tables placed with [H]
+\setlength{\tabcolsep}{5pt}
+\sloppy
+
+\titleformat{\section}{\Needspace*{9\baselineskip}\color{headblue}\large\bfseries}{\thesection.}{0.5em}{}[{\color{headblue}\vspace{2pt}\titlerule[0.8pt]}]
+\titleformat{\subsection}{\Needspace*{6\baselineskip}\color{headblue}\normalsize\bfseries}{\thesubsection}{0.7em}{}
+\titleformat{\subsubsection}{\Needspace*{5\baselineskip}\color{headblue}\normalsize\bfseries\itshape}{\thesubsubsection}{0.7em}{}
+\titlespacing*{\section}{0pt}{14pt}{8pt}
+\titlespacing*{\subsection}{0pt}{10pt}{4pt}
+\titlespacing*{\subsubsection}{0pt}{8pt}{3pt}
+\setcounter{tocdepth}{2}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\color{grayline}\instshort}
+\fancyhead[C]{\small\color{headblue}\bfseries PHOTON}
+\fancyhead[R]{\small\color{grayline}Group \groupno}
+\fancyfoot[C]{\small\color{grayline}\thepage}
+\renewcommand{\headrule}{\hbox to\headwidth{\color{headblue}\leaders\hrule height 0.6pt\hfill}}
+\renewcommand{\footrule}{\hbox to\headwidth{\color{headblue}\leaders\hrule height 0.6pt\hfill}}
+\renewcommand{\footrulewidth}{0.6pt}
+
+% ---------------------------------------------------------------- tables
+\newcommand{\hd}[1]{\textcolor{white}{\textbf{#1}}}            % header cell
+\newcommand{\headrow}{\rowcolor{pblue}}                        % blue header row
+\newcommand{\stripes}{\rowcolors{2}{white}{rowalt}}            % striped body rows
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\newcolumntype{C}[1]{>{\centering\arraybackslash}p{#1}}
+\newcommand{\cm}{\textcolor{greentab}{\ding{51}}}              % tick
+\newcommand{\xm}{\textcolor{redtab}{\ding{55}}}                % cross
+\newcommand{\pa}{\textcolor{orangeline}{Partial}}
+\newcommand{\ep}[1]{\nolinkurl{#1}}                         % path or endpoint that may break at /
+\arrayrulecolor{pblue}
+
+% ---------------------------------------------------------------- boxes
+% \begin{pbox}{blue|red|green|yellow}{Title} ... \end{pbox}
+\colorlet{bluefill}{boxfill}\colorlet{blueline}{boxline}\colorlet{bluetab}{headblue}
+\definecolor{yellowtab}{HTML}{9A7400}
+\newtcolorbox{pbox}[2]{enhanced, breakable, colback=#1fill, colframe=#1line, boxrule=0.6pt, arc=2pt,
+  left=6pt, right=6pt, top=8pt, bottom=5pt, fontupper=\small,
+  attach boxed title to top left={xshift=4mm, yshift=-2.2mm},
+  boxed title style={colback=#1tab, colframe=#1tab, arc=1.5pt, boxrule=0pt, top=1pt, bottom=1pt, left=5pt, right=5pt},
+  coltitle=white, fonttitle=\small\bfseries, title={#2}, before skip=8pt, after skip=8pt}
+
+% ---------------------------------------------------------------- code
+\lstdefinestyle{code}{basicstyle=\ttfamily\footnotesize, backgroundcolor=\color{codebg}, frame=single, rulecolor=\color{boxline},
+  framesep=4pt, xleftmargin=6pt, xrightmargin=6pt, columns=fullflexible, keepspaces=true, breaklines=true,
+  showstringspaces=false, commentstyle=\color{grayline}\itshape, keywordstyle=\color{headblue}\bfseries, aboveskip=6pt, belowskip=6pt}
+\lstset{style=code}
+
+% ---------------------------------------------------------------- figures and screenshots
+\newcommand{\fig}[1]{\input{figures/#1}}
+% \appshot{file}{label text}: an app screenshot if screens/<file> exists, otherwise a placeholder frame.
+\newcommand{\appshot}[2]{%
+  \IfFileExists{screens/#1}{\includegraphics[height=7cm, keepaspectratio]{screens/#1}}{%
+  \begin{tikzpicture}
+    \draw[grayline, fill=grayfill, rounded corners=10pt, line width=1pt] (0,0) rectangle (3.4,7);
+    \draw[grayline, rounded corners=2pt] (1.2,6.7) rectangle (2.2,6.82);
+    \node[align=center, font=\scriptsize, text width=3.0cm, text=grayline] at (1.7,3.5) {\textbf{#2}\\[4pt]screenshot to add:\\\texttt{\tiny report/screens/\\#1}\\[4pt]\texttt{\tiny adb exec-out\\screencap -p > #1}};
+  \end{tikzpicture}}}
+
+\begin{document}
+
+% BEGIN-TITLEPAGE (the Word report builds its own title page from team.json)
+\newgeometry{top=0.75in, bottom=0.7in, left=1in, right=1in}
+\begin{titlepage}
+\thispagestyle{empty}
+\centering
+\includegraphics[width=2.5cm]{images/iitr-logo.png}\par\vspace{5mm}
+\begin{tcolorbox}[colback=navy, colframe=navy, arc=3pt, boxrule=0pt, halign=center, top=7pt, bottom=7pt, width=\linewidth]
+  {\color{white}\large\bfseries \institute\par}\vspace{3pt}
+  {\color{white!88!navy}\small \department\par}\vspace{2pt}
+  {\color{white!88!navy}\small Subject: \course\ \ $|$\ \ Project Report\par}
+\end{tcolorbox}
+\vspace{4mm}
+{\color{headblue}\rule{\linewidth}{0.6pt}}\par\vspace{3mm}
+{\color{navy}\fontsize{30}{34}\selectfont\bfseries PHOTON\par}\vspace{2mm}
+{\color{headblue}\large\bfseries Live Photo Sync for Groups over Unreliable Mobile Networks\par}\vspace{3mm}
+{\color{grayline}\itshape A verified, resumable and ephemeral photo-sharing system\\built on HTTP/3, WebSocket and Redis Streams\par}
+\vspace{3mm}{\color{headblue}\rule{\linewidth}{0.6pt}}\par\vspace{3mm}
+{\color{navy}\Large\bfseries Group No. \groupno\par}\vspace{2mm}
+{\color{grayline}\textbf{Submitted To:} \submittedto\par}\vspace{1mm}
+{\color{grayline}\textbf{Submission Date:} \subdate\par}
+\vspace{4mm}
+\begin{tcolorbox}[enhanced, colback=boxfill, colframe=boxline, boxrule=0.6pt, arc=2pt, left=4pt, right=4pt, top=8pt, bottom=4pt,
+  attach boxed title to top left={xshift=4mm, yshift=-2.2mm}, boxed title style={colback=headblue, colframe=headblue, arc=1.5pt, boxrule=0pt},
+  coltitle=white, fonttitle=\small\bfseries, title={Group Members \& Contributions}]
+\footnotesize\rowcolors{2}{white}{rowalt}
+\begin{tabularx}{\linewidth}{L{2.35cm}L{1.55cm}L{4.15cm}Y}
+\headrow \hd{Name} & \hd{Enroll. No.} & \hd{\contacthead} & \hd{Individual Contribution}\\
+\memberrows
+\end{tabularx}
+\end{tcolorbox}
+\vfill
+{\color{headblue}\rule{\linewidth}{0.6pt}}\par\vspace{2mm}
+{\color{grayline}\small \versionline\par}
+\end{titlepage}
+\restoregeometry
+% END-TITLEPAGE
+
+% BEGIN-TOC
+\pagenumbering{arabic}
+\setcounter{page}{1}
+{\hypersetup{linkcolor=headblue}\tableofcontents}\thispagestyle{fancy}
+\clearpage
+% END-TOC
+
+\input{sections/introduction}
+\input{sections/background}
+\input{sections/proposed}
+\input{sections/implementation}
+\input{sections/conclusion}
+\input{sections/bibliography}
+
+\end{document}

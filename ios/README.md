@@ -2,6 +2,8 @@
 
 The iOS client of PHOTON ([Design.md](../Design.md), [implementation.md](../implementation.md) step 8.6). It talks to the same server as the Android app and uses the same wire format, generated from [proto/photon.proto](../proto/photon.proto) with swift-protobuf.
 
+> **Not updated to end-to-end encryption.** The server now requires every client to encrypt photos on the device ([e2ee.md](../e2ee.md)). This app predates that change. It sends no member key, so the server refuses its create and join requests (`400 INVALID_REQUEST`). It announces plain image types, which the server refuses with `415 UNSUPPORTED_FORMAT`, and it can't decrypt what other members upload. Until it is updated, it can't create, join or upload in any session ([e2ee.md §10](../e2ee.md#10-limits-and-trade-offs)). Updating it means implementing e2ee.md sections 3 to 7 in PhotonKit (CryptoKit has X25519, HKDF and AES-GCM), matching [tests/vectors/e2ee_v1.json](../tests/vectors/e2ee_v1.json) byte for byte, and regenerating the protobuf models for the new fields and messages. The rest of this README describes the app as it was before the change.
+
 The code is split so the logic can be built and tested without Xcode:
 
 | Part | What it is | Verified |

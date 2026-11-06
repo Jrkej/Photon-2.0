@@ -1,0 +1,55 @@
+{
+  "_comment": "Edit this file, then run ./build.sh. It fills the title page of the PDF and the Word report, and the title and team slides. Leave mobile empty to show the email only.",
+  "group_no": "13",
+  "institute": "Indian Institute of Technology Roorkee",
+  "institute_short": "IIT Roorkee",
+  "department": "Department of Computer Science & Engineering",
+  "course": "Computer Networks (CSC-303)",
+  "submitted_to": "Prof. Sandeep Kumar",
+  "submission_date": "3 November, 2026",
+  "version_line": "November 2026 | Version 1.0",
+  "members": [
+    {
+      "name": "Akshat Srivastava",
+      "enrollment": "24114010",
+      "email": "akshat_s@cs.iitr.ac.in",
+      "mobile": "",
+      "contribution": "System design; Redis Functions library (sessions, announce, fencing, quota); orchestrator service"
+    },
+    {
+      "name": "Shubham Singla",
+      "enrollment": "24114093",
+      "email": "shubham_s@cs.iitr.ac.in",
+      "mobile": "",
+      "contribution": "Image server: resumable chunked upload with CRC32C, SHA-256 verification, sandboxed decoder, outbox"
+    },
+    {
+      "name": "Yash Jain",
+      "enrollment": "24114108",
+      "email": "yash_j2@cs.iitr.ac.in",
+      "mobile": "",
+      "contribution": "Network edge (Caddy, TLS 1.3, HTTP/3), WebSocket event plane, Redis Streams catch-up and resync"
+    },
+    {
+      "name": "Pushkar Jain",
+      "enrollment": "24114071",
+      "email": "pushkar_j@cs.iitr.ac.in",
+      "mobile": "",
+      "contribution": "Auth service: OAuth 2.0 with PKCE (Google, GitHub), EdDSA JWTs, refresh rotation; Redis ACLs"
+    },
+    {
+      "name": "Aditya Yadav",
+      "enrollment": "24114007",
+      "email": "aditya_y@cs.iitr.ac.in",
+      "mobile": "",
+      "contribution": "Android app (Kotlin): UI, MediaStore observer, foreground service, WorkManager upload, receive pipeline"
+    },
+    {
+      "name": "Divyanshu Meena",
+      "enrollment": "24114034",
+      "email": "divyanshu_m@cs.iitr.ac.in",
+      "mobile": "",
+      "contribution": "iOS PhotonKit, push (FCM/APNs), Docker deployment, tests and benchmarks, project report and slides"
+    }
+  ]
+}

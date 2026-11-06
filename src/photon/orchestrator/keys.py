@@ -16,6 +16,8 @@ def session_keys(sid: str) -> list[str]:
         f"session:{t}:live",
         f"session:{t}:events",
         f"session:{t}:kicked",
+        f"session:{t}:tags",
+        f"session:{t}:keys",
     ]
 
 

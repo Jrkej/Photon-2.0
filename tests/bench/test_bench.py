@@ -19,16 +19,15 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from PIL import Image
 from websockets.asyncio.client import connect
 
+from photon.client import images
 from photon.client.api import PhotonClient
-from photon.client.uploader import crc32c_b64
-from photon.common import clock, ids, jwtutil
-from photon.common.config import Settings
+from photon.client.uploader import build_file, crc32c_b64
+from photon.common import clock, e2ee, ids, jwtutil
 from photon.common.pb import photon_pb2 as pb
 from photon.common.redisutil import Functions
-from photon.imageserver.decode import Decoder
 from photon.orchestrator import keys as K
 from tests.bench.conftest import Report, latency, pct, photo_like
-from tests.conftest import Login, Stack
+from tests.conftest import Login, Stack, share_keys
 
 pytestmark = pytest.mark.bench
 RET = 30 * 60 * 1000
@@ -45,6 +44,15 @@ def sha_of(i: int, tag: str = "b") -> str:
     return hashlib.sha256(f"{tag}{i}".encode()).hexdigest()
 
 
+def tag_of(sha: str) -> str:
+    """A photo tag per hash (e2ee.md 6.2): each benchmarked file is a distinct photo."""
+    return hashlib.sha256(b"tag" + sha.encode()).hexdigest()
+
+
+PK = hashlib.sha256(b"bench member key").hexdigest()  # the Lua functions store member keys as given
+BOX = "ab" * e2ee.BOX_LEN
+
+
 # --------------------------------------------------------------------------- 1. Lua state transitions
 
 async def test_lua_functions(env: Stack, bench: Report) -> None:
@@ -53,29 +61,39 @@ async def test_lua_functions(env: Stack, bench: Report) -> None:
     sid = ids.new_sid()
     keys = K.session_keys(sid)
     now = clock.now_ms
-    await fn.call("create_session", keys, sid, now(), RET, "host", 12 * 3600_000, 10, "CODE", "TOKEN")
+    await fn.call("create_session", keys, sid, now(), RET, "host", 12 * 3600_000, 10, "CODE", "TOKEN", PK)
     rows = []
 
-    join_s = [await timed(lambda i=i: fn.call("join", keys, sid, now(), RET, f"m{i}", 12 * 3600_000))
+    join_s = [await timed(lambda i=i: fn.call("join", keys, sid, now(), RET, f"m{i}", 12 * 3600_000, PK))
               for i in range(9)]
     rows.append({"function": "join", **latency(join_s)})
+
+    # The host seals epoch 1 for each newcomer, one call per member as a phone does on MEMBER_JOINED
+    share_s = [await timed(lambda i=i: fn.call("put_keys", keys, sid, now(), RET, "host", 1, "0", 1, f"m{i}", BOX))
+               for i in range(9)]
+    rows.append({"function": "put_keys (share with one member)", **latency(share_s)})
+    state_s = [await timed(lambda: fn.call_ro("key_state", keys, sid, now(), RET, "m1")) for _ in range(200)]
+    rows.append({"function": "key_state (10 members)", **latency(state_s)})
+
+    def announce(member: str, sha: str, tag: str, up: str | None = None) -> Awaitable[list[Any]]:
+        return fn.call("announce", keys, sid, now(), RET, member, sha, 3_000_000, e2ee.MIME, now(),
+                       up or ids.new_upload_id(), 10**15, 3, 20, 3, 900_000, 60_000, tag, 1)
 
     n = 1000
     announce_s, stored_s = [], []
     for i in range(n):
         sha, up = sha_of(i), ids.new_upload_id()
-        announce_s.append(await timed(lambda sha=sha, up=up: fn.call(
-            "announce", keys, sid, now(), RET, "host", sha, 3_000_000, "image/jpeg", now(), up,
-            10**15, 3, 20, 3, 900_000, 60_000)))
+        announce_s.append(await timed(lambda sha=sha, up=up: announce("host", sha, tag_of(sha), up)))
         stored_s.append(await timed(lambda sha=sha, up=up: fn.call(
             "report_stored", keys, sid, now(), RET, sha, up, now(), now() + RET)))
     rows.append({"function": "announce (new photo)", **latency(announce_s)})
     rows.append({"function": "report_stored (+ event)", **latency(stored_s)})
 
-    dup_s = [await timed(lambda i=i: fn.call(
-        "announce", keys, sid, now(), RET, "m1", sha_of(i % n), 3_000_000, "image/jpeg", now(),
-        ids.new_upload_id(), 10**15, 3, 20, 3, 900_000, 60_000)) for i in range(1000)]
-    rows.append({"function": "announce (duplicate)", **latency(dup_s)})
+    dup_s = [await timed(lambda i=i: announce("m1", sha_of(i % n), tag_of(sha_of(i % n)))) for i in range(1000)]
+    rows.append({"function": "announce (duplicate file)", **latency(dup_s)})
+    # Another member's copy of the same photo: a different file and hash, the same tag
+    tag_s = [await timed(lambda i=i: announce("m2", sha_of(i, "other"), tag_of(sha_of(i % n)))) for i in range(1000)]
+    rows.append({"function": "announce (same photo, another file: tag dedupe)", **latency(tag_s)})
 
     dl_s = [await timed(lambda i=i: fn.call_ro("download_check", keys, sid, now(), RET, "m2", sha_of(i % n)))
             for i in range(1000)]
@@ -139,38 +157,63 @@ async def test_crypto(bench: Report) -> None:
     ])
 
 
-# --------------------------------------------------------------------------- 3. Image validation and thumbnails
+# --------------------------------------------------------------------------- 3. End-to-end encryption on the phone
 
-async def test_decode(bench: Report, tmp_path: Any) -> None:
-    """Each step is a fresh sandboxed subprocess (memory, CPU and time limits)."""
-    dec = Decoder(Settings(env="test"))
-    tiny = photo_like(64, 48)
-    small = photo_like(1600, 1200, seed=1)
+def median_ms(fn: Callable[[], Any], runs: int = 3) -> float:
+    samples = []
+    for _ in range(runs):
+        t = time.perf_counter()
+        fn()
+        samples.append(time.perf_counter() - t)
+    return statistics.median(samples) * 1000
+
+
+async def test_client_crypto(bench: Report, tmp_path: Any) -> None:
+    """The work that moved from the image server to the uploader's and receivers' devices (e2ee.md 6, 7)."""
+    bundle = e2ee.new_session_bundle()
+    keys = {bundle.epoch: bundle.key}
     big = photo_like(4032, 3024, seed=2)
     heif = pillow_heif.from_pillow(Image.open(io.BytesIO(big)))
     heic_path = tmp_path / "big.heic"
     heif.save(heic_path, quality=85)
-    cases = [("tiny JPEG 64×48 (process overhead)", tiny, "image/jpeg", ".jpg"),
-             ("JPEG 1600×1200", small, "image/jpeg", ".jpg"),
-             ("JPEG 4032×3024 (12 MP)", big, "image/jpeg", ".jpg"),
-             ("HEIC 4032×3024 (12 MP)", heic_path.read_bytes(), "image/heic", ".heic")]
+    cases = [("JPEG 1600×1200", photo_like(1600, 1200, seed=1)),
+             ("JPEG 4032×3024 (12 MP)", big),
+             ("HEIC 4032×3024 (12 MP)", heic_path.read_bytes())]
     rows = []
-    for label, data, mime, ext in cases:
-        src = tmp_path / f"in{ext}"
-        src.write_bytes(data)
-        row: dict[str, Any] = {"image": label, "size": f"{len(data) / 1e6:.1f} MB"}
-        for mode, px in (("validate", 0), ("thumb", 320), ("preview", 1600)):
-            runs = []
-            for _ in range(3):
-                t = time.perf_counter()
-                res = await dec.run(mode, src, tmp_path / "out.webp" if px else None, mime, px)
-                runs.append(time.perf_counter() - t)
-                assert res.ok, (label, mode, res)
-            row[f"{mode}_ms"] = statistics.median(runs) * 1000
-        rows.append(row)
-    bench.add("3. Image validation and thumbnails (sandboxed subprocess, median of 3)", rows,
-              "validate + thumb run on every upload's complete; preview runs once, on the first preview "
-              "download. A 12 MP photo costs about validate + thumb of CPU on the image server.")
+    for label, data in cases:
+        prepared = images.prepare(data)
+        file = build_file(bundle, data, prepared, 0)
+        header = e2ee.parse_header(file)
+        thumb = file[:header.prefix_len("thumb")]
+        rows.append({
+            "image": label, "size": f"{len(data) / 1e6:.1f} MB",
+            "thumb+preview_ms": median_ms(lambda data=data: images.prepare(data)),
+            "encrypt_ms": median_ms(lambda data=data, prepared=prepared: build_file(bundle, data, prepared, 0)),
+            "tag_ms": median_ms(lambda data=data: e2ee.photo_tag(bundle.tag_key, data)),
+            "decrypt_full_ms": median_ms(lambda file=file: e2ee.decrypt_photo(file, keys)),
+            "decrypt_thumb_ms": median_ms(lambda thumb=thumb: e2ee.decrypt_photo(thumb, keys)),
+            "thumb prefix": f"{len(thumb) / 1e3:.0f} kB",
+            "overhead": f"{len(file) - len(data) - len(prepared.thumb) - len(prepared.preview)} B",
+        })
+    member = e2ee.new_identity()
+    member_pub = e2ee.public_bytes(member)
+    n = 500
+    t = time.perf_counter()
+    boxes = [e2ee.seal(bundle, member_pub, "S" * 22, "member") for _ in range(n)]
+    seal_rate = n / (time.perf_counter() - t)
+    t = time.perf_counter()
+    for box in boxes:
+        e2ee.open_box(box, member, "S" * 22, "member", 1)
+    open_rate = n / (time.perf_counter() - t)
+    t = time.perf_counter()
+    for _ in range(20_000):
+        e2ee.parse_header(file)
+    header_rate = 20_000 / (time.perf_counter() - t)
+    bench.add("3. End-to-end encryption on the device (one core, median of 3)", rows,
+              f"thumb+preview is the image work the server used to do; it now runs on the uploader's phone, before "
+              f"AES-256-GCM. Receivers decrypt only the prefix they download. Sealing a session key for one member "
+              f"(X25519 + HKDF + AES-GCM): {seal_rate:,.0f}/s; opening one: {open_rate:,.0f}/s. The image server's "
+              f"only per-upload check, parsing the header: {header_rate:,.0f}/s.")
 
 
 # --------------------------------------------------------------------------- 4. Announce over HTTP
@@ -193,7 +236,8 @@ async def test_announce_http(env: Stack, login: Login, bench: Report) -> None:
             for i in range(per):
                 sha = hashlib.sha256(f"{conc}-{w}-{i}".encode()).digest()
                 t = time.perf_counter()
-                ann = await c.announce(sid, sha, 3_000_000, "image/jpeg", clock.now_ms())
+                ann = await c.announce(sid, sha, 3_000_000, e2ee.MIME, clock.now_ms(),
+                                       hashlib.sha256(b"tag" + sha).digest(), 1)
                 samples.append(time.perf_counter() - t)
                 # Complete it server-side so live reservations stay realistic (at most a few per user)
                 await fn.call("report_stored", K.session_keys(sid), sid, clock.now_ms(), RET, sha.hex(),
@@ -211,7 +255,8 @@ async def test_announce_http(env: Stack, login: Login, bench: Report) -> None:
     async def dup_one() -> None:
         async with sem:
             t = time.perf_counter()
-            r = await users[0].announce(sids[0], sha, 3_000_000, "image/jpeg", clock.now_ms())
+            r = await users[0].announce(sids[0], sha, 3_000_000, e2ee.MIME, clock.now_ms(),
+                                        hashlib.sha256(b"tag" + sha).digest(), 1)
             dup.append(time.perf_counter() - t)
             assert r.result == pb.AnnounceResponse.ALREADY_UPLOADED
 
@@ -226,12 +271,24 @@ async def test_announce_http(env: Stack, login: Login, bench: Report) -> None:
 
 # --------------------------------------------------------------------------- 5. Upload end to end by size
 
-async def upload_timed(c: PhotonClient, sid: str, data: bytes) -> dict[str, float]:
-    sha = hashlib.sha256(data).digest()
+async def encrypt(c: PhotonClient, sid: str, data: bytes) -> tuple[bytes, bytes, int]:
+    """What the phone does before announcing: thumbnail, preview, encrypt, tag (e2ee.md 7)."""
+    bundle = await c.current_bundle(sid)
+    assert bundle is not None
+    return build_file(bundle, data, images.prepare(data), 0), e2ee.photo_tag(bundle.tag_key, data), bundle.epoch
+
+
+async def upload_timed(c: PhotonClient, sid: str, data: bytes,
+                       built: tuple[bytes, bytes, int] | None = None) -> dict[str, float]:
+    """Encrypts `data` (unless `built` is given), then announce to STORED; "total" is the server path only."""
+    te = time.perf_counter()
+    file, tag, epoch = built or await encrypt(c, sid, data)
+    sha = hashlib.sha256(file).digest()
     t0 = time.perf_counter()
-    ann = await c.announce(sid, sha, len(data), "image/jpeg", clock.now_ms())
+    ann = await c.announce(sid, sha, len(file), e2ee.MIME, clock.now_ms(), tag, epoch)
+    assert ann.result == pb.AnnounceResponse.UPLOAD, ann
     t1 = time.perf_counter()
-    parts = [data[i:i + CHUNK] for i in range(0, len(data), CHUNK)]
+    parts = [file[i:i + CHUNK] for i in range(0, len(file), CHUNK)]
     sem = asyncio.Semaphore(3)
 
     async def put(i: int) -> None:
@@ -246,7 +303,7 @@ async def upload_timed(c: PhotonClient, sid: str, data: bytes) -> dict[str, floa
             break
         await asyncio.sleep(0.05)
     t3 = time.perf_counter()
-    return {"announce": t1 - t0, "chunks": t2 - t1, "complete": t3 - t2, "total": t3 - t0}
+    return {"encrypt": t0 - te, "announce": t1 - t0, "chunks": t2 - t1, "complete": t3 - t2, "total": t3 - t0}
 
 
 async def test_upload_sizes(env: Stack, login: Login, bench: Report) -> None:
@@ -263,12 +320,15 @@ async def test_upload_sizes(env: Stack, login: Login, bench: Report) -> None:
             size = len(data)
             runs.append(await upload_timed(host, sid, data))
         med = {k: statistics.median(x[k] for x in runs) for k in runs[0]}
-        rows.append({"photo": label, "size": f"{size / 1e6:.1f} MB", "announce_ms": med["announce"] * 1000,
+        rows.append({"photo": label, "size": f"{size / 1e6:.1f} MB", "encrypt_ms": med["encrypt"] * 1000,
+                     "announce_ms": med["announce"] * 1000,
                      "chunks_ms": med["chunks"] * 1000, "chunk MB/s": size / 1e6 / med["chunks"],
                      "complete_ms": med["complete"] * 1000, "total_ms": med["total"] * 1000})
     bench.add("5. Upload end to end by photo size (median of 3; 1 MiB chunks, 3 in parallel)", rows,
-              "complete = assemble + SHA-256 + validate + thumbnail + metadata + the fenced report to the "
-              "orchestrator. Over loopback; on a phone the chunk phase is bounded by the network.")
+              "encrypt = the client's thumbnail, preview and AES-GCM, before the announce (not in total). "
+              "complete = assemble + SHA-256 + header check + metadata + the fenced report to the orchestrator; "
+              "the server no longer decodes images. Over loopback; on a phone the chunk phase is bounded by the "
+              "network.")
 
 
 # --------------------------------------------------------------------------- 6. Live delivery to a session
@@ -380,7 +440,7 @@ async def test_websocket_fanout(env: Stack, login: Login, bench: Report) -> None
     fn = Functions(env.redis)
     rounds = 10
     for r in range(rounds):
-        for verb, args in (("join", (10**9,)), ("leave", ())):
+        for verb, args in (("join", (10**9, PK)), ("leave", ())):
             await asyncio.gather(*(fn.call(verb, K.session_keys(sid), sid, clock.now_ms(), RET, f"ghost{r}", *args)
                                    for _, sid in clients[::per]))
             await asyncio.sleep(0.15)
@@ -402,35 +462,31 @@ async def test_websocket_fanout(env: Stack, login: Login, bench: Report) -> None
 # --------------------------------------------------------------------------- 8. Upload throughput
 
 async def test_upload_throughput(env: Stack, login: Login, bench: Report) -> None:
-    decoder = env.img.state.pipeline.decoder
-    saved = decoder.sem
-    decoder.sem = asyncio.Semaphore(os.cpu_count() or 4)
-    try:
-        host = await login("thost")
-        info = await host.create_session()
-        users = [host]
-        for i in range(7):
-            u = await login(f"t{i}")
-            await u.join(code=info.join_code)
-            users.append(u)
-        photos = {u.uid: [photo_like(2400, 1800, seed=900 + j * 13 + k) for k in range(6)]
-                  for j, u in enumerate(users)}
-        total_bytes = sum(len(p) for ps in photos.values() for p in ps)
-        per_photo: list[float] = []
+    host = await login("thost")
+    info = await host.create_session()
+    users = [host]
+    for i in range(7):
+        u = await login(f"t{i}")
+        await u.join(code=info.join_code)
+        users.append(u)
+    await share_keys(info.session_id, *users)
+    # Encrypted before the clock starts: the phones' work is in section 3, this measures the servers
+    photos = {u.uid: [await encrypt(u, info.session_id, photo_like(2400, 1800, seed=900 + j * 13 + k))
+                      for k in range(6)] for j, u in enumerate(users)}
+    total_bytes = sum(len(p[0]) for ps in photos.values() for p in ps)
+    per_photo: list[float] = []
 
-        async def run(u: PhotonClient) -> None:
-            for data in photos[u.uid]:
-                per_photo.append((await upload_timed(u, info.session_id, data))["total"])
+    async def run(u: PhotonClient) -> None:
+        for built in photos[u.uid]:
+            per_photo.append((await upload_timed(u, info.session_id, b"", built))["total"])
 
-        t = time.perf_counter()
-        await asyncio.gather(*(run(u) for u in users))
-        wall = time.perf_counter() - t
-    finally:
-        decoder.sem = saved
+    t = time.perf_counter()
+    await asyncio.gather(*(run(u) for u in users))
+    wall = time.perf_counter() - t
     n = len(per_photo)
     bench.add("8. Upload throughput: 8 members uploading at once (48 photos of 2400×1800)", [
         {"photos": n, "wall_s": wall, "photos/s": n / wall, "MB/s": total_bytes / 1e6 / wall,
          "per-photo p50_ms": pct([x * 1000 for x in per_photo], 50),
          "per-photo p95_ms": pct([x * 1000 for x in per_photo], 95)},
-    ], f"{total_bytes / 1e6:.0f} MB in total. Bound by CPU: hashing, and the two decode subprocesses per photo "
-       f"(validate, thumb), with {os.cpu_count()} decoders allowed at once.")
+    ], f"{total_bytes / 1e6:.0f} MB of encrypted files in total. The image server only hashes, checks the "
+       f"header and moves files: no decoding, so it is bound by hashing and disk, not image work.")

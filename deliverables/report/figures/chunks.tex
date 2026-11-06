@@ -1,0 +1,20 @@
+% Resumable chunked upload: selective repeat at the application layer
+\begin{tikzpicture}[x=1cm,y=1cm,
+  ck/.style={draw=#1line, fill=#1fill, minimum width=12mm, minimum height=8mm, font=\scriptsize, align=center, line width=0.6pt},
+  ]
+\node[font=\small\bfseries, anchor=west, text=headblue] at (-0.6,1.0) {Attempt 1: three PUTs in flight, each chunk carries X-Chunk-CRC32C};
+\foreach \i/\c in {0/green,1/green,2/green,3/green,4/red,5/green,6/green}{
+  \node[ck=\c] (a\i) at (\i*1.45+0.2,0) {chunk \i\\\tiny 1 MiB};
+}
+\node[ck=gray, minimum width=10mm] (a7) at (7*1.45+0.1,0) {7\\\tiny 0.7 MiB};
+\node[font=\scriptsize, text=redtab, align=center] at (4*1.45+0.2,-0.85) {lost when Wi-Fi\\switched to LTE};
+\node[font=\scriptsize, text=grayline, align=center] at (7*1.45+0.1,-0.85) {not yet sent};
+\node[blk, fill=white, font=\scriptsize, align=left, anchor=west] (st) at (11.0,0) {\textbf{GET /v1/uploads/\{id\}}\\received = \{0,1,2,3,5,6\}\\missing = \{4, 7\}};
+\draw[arr] (a7.east) -- (st.west);
+\node[font=\small\bfseries, anchor=west, text=headblue] at (-0.6,-1.75) {Attempt 2: only the missing chunks are sent, then complete};
+\foreach \i in {0,1,2,3,5,6}{ \node[ck=gray, opacity=0.45, text opacity=0.6] at (\i*1.45+0.2,-2.75) {chunk \i}; }
+\node[ck=blue] (b4) at (4*1.45+0.2,-2.75) {chunk 4\\\tiny resent};
+\node[ck=blue, minimum width=10mm] (b7) at (7*1.45+0.1,-2.75) {7\\\tiny sent};
+\node[cli, font=\scriptsize, anchor=west, align=left] (cp) at (11.0,-2.75) {\textbf{POST complete}\\server reassembles,\\SHA-256 over all bytes};
+\draw[arr] (b7.east) -- (cp.west);
+\end{tikzpicture}

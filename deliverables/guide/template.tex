@@ -1,0 +1,78 @@
+% Pandoc template for the local testing guide (../../local.md -> PHOTON_Local_Testing.pdf).
+% Same look as the report: Times, blue headings, blue-header striped tables, shaded code.
+% Built by ../build.sh; team macros (\groupno, \instshort, \course) come from ../report/team.tex.
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\DeclareUnicodeCharacter{2192}{\ensuremath{\rightarrow}}
+\usepackage{mathptmx}
+\renewcommand{\ttdefault}{lmtt}
+\usepackage[margin=1in, headheight=22pt]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage[table]{xcolor}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{listings}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage[obeyspaces,spaces]{url}
+\def\UrlBreaks{\do\/}\def\UrlBigBreaks{}   % inline code breaks only at / and spaces, never inside an address
+\usepackage{needspace}
+\usepackage[colorlinks=true, linkcolor=pblue, urlcolor=pblue, pdfborder={0 0 0}]{hyperref}
+\hypersetup{pdftitle={$title$}, pdfsubject={PHOTON local testing guide}}
+
+\definecolor{navy}{HTML}{1B365D}
+\definecolor{pblue}{HTML}{2E6DB4}
+\definecolor{headblue}{HTML}{2F5F98}
+\definecolor{boxline}{HTML}{6E9CD2}
+\definecolor{rowalt}{HTML}{EEF4FB}
+\definecolor{grayline}{HTML}{8A8A8A}
+\definecolor{codebg}{HTML}{F6F8FA}
+
+\input{team}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{5pt plus 2pt}
+\setlist{itemsep=2pt, topsep=3pt, parsep=1pt}
+\providecommand{\tightlist}{\setlength{\itemsep}{1pt}\setlength{\parskip}{0pt}}
+\setcounter{secnumdepth}{0}
+\sloppy
+
+\titleformat{\section}{\Needspace*{8\baselineskip}\color{headblue}\large\bfseries}{}{0pt}{}[{\color{headblue}\nobreak\vspace{2pt}\nobreak\titlerule[0.8pt]}]
+\titleformat{\subsection}{\Needspace*{6\baselineskip}\color{headblue}\normalsize\bfseries}{}{0pt}{}
+\titlespacing*{\section}{0pt}{14pt}{6pt}
+\titlespacing*{\subsection}{0pt}{10pt}{3pt}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\color{grayline}\instshort}
+\fancyhead[C]{\small\color{headblue}\bfseries PHOTON: Local Testing Guide}
+\fancyhead[R]{\small\color{grayline}Group \groupno}
+\fancyfoot[C]{\small\color{grayline}\thepage}
+\renewcommand{\headrule}{\hbox to\headwidth{\color{headblue}\leaders\hrule height 0.6pt\hfill}}
+
+% tables written by guide.lua
+\renewcommand{\arraystretch}{1.3}
+\setlength{\tabcolsep}{5pt}
+\newcommand{\hd}[1]{\textcolor{white}{\textbf{#1}}}
+
+\providecommand{\passthrough}[1]{#1}
+\lstset{basicstyle=\ttfamily\footnotesize, backgroundcolor=\color{codebg}, frame=single, rulecolor=\color{boxline},
+  framesep=4pt, xleftmargin=5pt, xrightmargin=5pt, columns=fullflexible, keepspaces=true, breaklines=true,
+  postbreak=\mbox{\textcolor{grayline}{$$\hookrightarrow$$}\space}, showstringspaces=false, upquote=true,
+  language=bash, morekeywords={adb,pkill,sudo}, keywordstyle=\color{headblue}\bfseries,
+  commentstyle=\color{grayline}\itshape, stringstyle=\color{navy}, aboveskip=6pt, belowskip=6pt}
+
+\begin{document}
+
+\thispagestyle{fancy}
+\begin{center}
+{\color{navy}\fontsize{20}{24}\selectfont\bfseries $title$\par}\vspace{5pt}
+{\color{grayline}PHOTON \,$$|$$\, \course \,$$|$$\, Group \groupno\par}
+\end{center}
+\vspace{-2pt}{\color{headblue}\rule{\linewidth}{0.8pt}}\par\vspace{2pt}
+
+$body$
+
+\end{document}

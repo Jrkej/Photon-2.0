@@ -2,19 +2,23 @@
 --
 -- PHOTON state transitions. Every transition is one function, so every check and write in it is atomic.
 --
--- Session functions get the same six keys, all tagged with the session id {sid}:
+-- Session functions get the same eight keys, all tagged with the session id {sid}:
 --   KEYS[1] session:{sid}           hash   host, status, created_at, expires_at, max_members, stored_bytes,
---                                          reserved_bytes, join_code, invite_token, last_event_id, trimmed_before
---   KEYS[2] session:{sid}:members   hash   uid -> {role, joined_at, strikes}
---   KEYS[3] session:{sid}:photos    hash   sha256 hex -> {status, uploader, upload_id, size, mime, taken_at,
---                                          reserved_at, stored_at, expires_at}
+--                                          reserved_bytes, join_code, invite_token, last_event_id, trimmed_before,
+--                                          epoch (current key epoch), rotate ('1' after a member left)
+--   KEYS[2] session:{sid}:members   hash   uid -> {role, joined_at, strikes, pk (member key, hex), ke (newest
+--                                          key epoch held)}
+--   KEYS[3] session:{sid}:photos    hash   sha256 hex (of the encrypted file) -> {status, uploader, upload_id, size,
+--                                          mime, taken_at, reserved_at, stored_at, expires_at, tag, ke}
 --   KEYS[4] session:{sid}:live      hash   upload_id -> {sha, uploader, size, reserved_at}
 --   KEYS[5] session:{sid}:events    stream
 --   KEYS[6] session:{sid}:kicked    set
+--   KEYS[7] session:{sid}:tags      hash   photo tag hex -> sha256 hex (dedupe of the same photo in different files)
+--   KEYS[8] session:{sid}:keys      hash   '<epoch>:<uid>' -> {from, box (hex)}: sealed key bundles (e2ee.md)
 -- ARGV always starts with sid, now_ms, retention_ms. Lease keys upload:{sid}:<upload_id> are built here with the
 -- same tag, so they stay in the session's slot. Results are {'OK', ...} or {'ERR', CODE}.
 
-local VERSION = '3'
+local VERSION = '4'
 local HOUR = 3600000
 
 local function ok(...) return {'OK', ...} end
@@ -70,6 +74,7 @@ local function release_reservation(keys, sid, sha, upload_id)
   if e and e.status == 'UPLOADING' and e.upload_id == upload_id then
     redis.call('HDEL', keys[3], sha)
     redis.call('HINCRBY', keys[1], 'reserved_bytes', -e.size)
+    if e.tag and redis.call('HGET', keys[7], e.tag) == sha then redis.call('HDEL', keys[7], e.tag) end
   end
   redis.call('HDEL', keys[4], upload_id)
   redis.call('DEL', lease_key(sid, upload_id))
@@ -78,8 +83,15 @@ end
 local function touch(keys, now, idle_ms)
   local exp = now + idle_ms
   redis.call('HSET', keys[1], 'expires_at', exp)
-  for i = 1, 6 do redis.call('PEXPIREAT', keys[i], exp + HOUR) end
+  for i = 1, #keys do redis.call('PEXPIREAT', keys[i], exp + HOUR) end
   return exp
+end
+
+-- A member's sealed boxes go when they leave or get a new member key, so members can seal for them afresh.
+local function drop_boxes(keys, uid)
+  for _, field in ipairs(redis.call('HKEYS', keys[8])) do
+    if string.match(field, '^%d+:(.+)$') == uid then redis.call('HDEL', keys[8], field) end
+  end
 end
 
 local function remove_member(keys, sid, uid, now, retention)
@@ -89,6 +101,7 @@ local function remove_member(keys, sid, uid, now, retention)
     if r.uploader == uid then release_reservation(keys, sid, r.sha, live[i]) end
   end
   redis.call('HDEL', keys[2], uid)
+  drop_boxes(keys, uid)
   append_event(keys, now, retention, {'t', 'MEMBER_LEFT', 'm', uid})
 end
 
@@ -120,6 +133,7 @@ local function do_end(keys, sid, now, retention)
     local sha, e = photos[i], cjson.decode(photos[i + 1])
     if e.status == 'UPLOADING' then
       redis.call('HDEL', keys[3], sha)
+      if e.tag then redis.call('HDEL', keys[7], e.tag) end
       redis.call('DEL', lease_key(sid, e.upload_id))
     else
       if e.status == 'STORED' then
@@ -133,7 +147,7 @@ local function do_end(keys, sid, now, retention)
   redis.call('DEL', keys[4])
   append_event(keys, now, retention, {'t', 'SESSION_ENDED'})
   local members = redis.call('HKEYS', keys[2])
-  for i = 1, 6 do redis.call('PEXPIRE', keys[i], HOUR) end
+  for i = 1, #keys do redis.call('PEXPIRE', keys[i], HOUR) end
   return {to_delete, members, info[1] or '', info[2] or ''}
 end
 
@@ -165,22 +179,32 @@ local function f_create_session(keys, args)
   if redis.call('EXISTS', keys[1]) == 1 then return err('CONFLICT') end
   redis.call('HSET', keys[1], 'host', uid, 'status', 'ACTIVE', 'created_at', now, 'max_members', args[6],
              'stored_bytes', 0, 'reserved_bytes', 0, 'join_code', args[7], 'invite_token', args[8],
-             'last_event_id', '0-0', 'trimmed_before', '0-0')
-  put_json(keys[2], uid, {role = 'host', joined_at = now, strikes = 0})
-  append_event(keys, now, retention, {'t', 'MEMBER_JOINED', 'm', uid})
+             'last_event_id', '0-0', 'trimmed_before', '0-0', 'epoch', 1, 'rotate', '0')
+  -- The creator made epoch 1's key on its phone, so it holds epoch 1 from the start.
+  put_json(keys[2], uid, {role = 'host', joined_at = now, strikes = 0, pk = args[9], ke = 1})
+  append_event(keys, now, retention, {'t', 'MEMBER_JOINED', 'm', uid, 'pk', args[9]})
   return ok(touch(keys, now, tonumber(args[5])))
 end
 
--- ARGV: sid, now, retention, uid, idle_ms
+-- ARGV: sid, now, retention, uid, idle_ms, member_key (hex)
 local function f_join(keys, args)
-  local sid, now, retention, uid = args[1], tonumber(args[2]), tonumber(args[3]), args[4]
+  local sid, now, retention, uid, pk = args[1], tonumber(args[2]), tonumber(args[3]), args[4], args[6]
   local st = redis.call('HMGET', keys[1], 'status', 'max_members')
   if st[1] ~= 'ACTIVE' then return err('SESSION_ENDED') end
-  if redis.call('HEXISTS', keys[2], uid) == 1 then return ok('ALREADY_MEMBER') end
+  local m = get_json(keys[2], uid)
+  if m then
+    if m.pk == pk then return ok('ALREADY_MEMBER') end
+    -- The same user from a new install: a new member key, so members must seal the session key again.
+    m.pk, m.ke = pk, 0
+    put_json(keys[2], uid, m)
+    drop_boxes(keys, uid)
+    append_event(keys, now, retention, {'t', 'MEMBER_JOINED', 'm', uid, 'pk', pk})
+    return ok('REKEYED')
+  end
   if redis.call('SISMEMBER', keys[6], uid) == 1 then return err('KICKED') end
   if redis.call('HLEN', keys[2]) >= tonumber(st[2]) then return err('SESSION_FULL') end
-  put_json(keys[2], uid, {role = 'member', joined_at = now, strikes = 0})
-  append_event(keys, now, retention, {'t', 'MEMBER_JOINED', 'm', uid})
+  put_json(keys[2], uid, {role = 'member', joined_at = now, strikes = 0, pk = pk, ke = 0})
+  append_event(keys, now, retention, {'t', 'MEMBER_JOINED', 'm', uid, 'pk', pk})
   touch(keys, now, tonumber(args[5]))
   return ok('JOINED')
 end
@@ -207,6 +231,7 @@ local function f_leave(keys, args)
     local r = do_end(keys, sid, now, retention)
     return ok('ENDED', r[1], r[2], r[3], r[4])
   end
+  redis.call('HSET', keys[1], 'rotate', '1')   -- the leaver holds the current key: the next uploader rotates
   if m.role == 'host' then transfer_host(keys, now, retention) end
   return ok('LEFT')
 end
@@ -222,6 +247,7 @@ local function f_kick(keys, args)
   redis.call('SADD', keys[6], target)
   if redis.call('HEXISTS', keys[2], target) == 0 then return ok('NOOP') end
   remove_member(keys, sid, target, now, retention)
+  redis.call('HSET', keys[1], 'rotate', '1')
   return ok('KICKED')
 end
 
@@ -261,7 +287,7 @@ end
 ------------------------------------------------------------------------------------------------- photos
 
 -- ARGV: sid, now, retention, uid, sha, size, mime, taken_at, new_upload_id, cap_bytes, max_live_user,
---       max_live_session, max_strikes, lease_ms, takeover_ms
+--       max_live_session, max_strikes, lease_ms, takeover_ms, photo_tag (hex), key_epoch
 local function f_announce(keys, args)
   local sid, now = args[1], tonumber(args[2])
   local uid, sha, size, mime, taken_at, new_id =
@@ -269,11 +295,16 @@ local function f_announce(keys, args)
   local cap, max_user, max_session, max_strikes =
         tonumber(args[10]), tonumber(args[11]), tonumber(args[12]), tonumber(args[13])
   local lease_ms, takeover_ms = tonumber(args[14]), tonumber(args[15])
+  local tag, key_epoch = args[16], tonumber(args[17])
 
   if not is_active(keys) then return err('SESSION_ENDED') end
   local m = get_json(keys[2], uid)
   if not m then return err('NOT_A_MEMBER') end
   if (m.strikes or 0) >= max_strikes then return err('UPLOADS_BLOCKED') end
+  local ks = redis.call('HMGET', keys[1], 'epoch', 'rotate')
+  if ks[2] == '1' then return err('KEY_ROTATION_REQUIRED') end
+  if key_epoch ~= tonumber(ks[1]) then return err('KEY_EPOCH_STALE') end
+  if (m.ke or 0) < key_epoch then return err('KEY_REQUIRED') end
 
   local takeover = 0
   local e = get_json(keys[3], sha)
@@ -287,6 +318,26 @@ local function f_announce(keys, args)
     if now - e.reserved_at < takeover_ms then return ok('IN_PROGRESS') end
     release_reservation(keys, sid, sha, e.upload_id)                      -- stale: take over
     takeover = 1
+  end
+
+  -- The same photo in another file (another member's upload, or this member's rebuilt file): the tag decides.
+  local by_tag = redis.call('HGET', keys[7], tag)
+  if by_tag and by_tag ~= sha then
+    local t = get_json(keys[3], by_tag)
+    if not t then
+      redis.call('HDEL', keys[7], tag)
+    elseif t.status == 'STORED' or t.status == 'EXPIRED' then
+      return ok('ALREADY_UPLOADED')
+    elseif t.status == 'RECALLED' then
+      return err('PHOTO_RECALLED')
+    elseif t.uploader == uid then
+      release_reservation(keys, sid, by_tag, t.upload_id)                 -- its own rebuilt file replaces it
+    elseif redis.call('EXISTS', lease_key(sid, t.upload_id)) == 1 or now - t.reserved_at < takeover_ms then
+      return ok('IN_PROGRESS')
+    else
+      release_reservation(keys, sid, by_tag, t.upload_id)                 -- stale: take over
+      takeover = 1
+    end
   end
 
   -- Live-upload limits. Reservations whose lease is gone are stale and released here.
@@ -306,9 +357,10 @@ local function f_announce(keys, args)
   if tonumber(b[1]) + tonumber(b[2]) + size > cap then return err('QUOTA_EXCEEDED') end
 
   if redis.call('HSETNX', keys[3], sha, cjson.encode({status = 'UPLOADING', uploader = uid, upload_id = new_id,
-      size = size, mime = mime, taken_at = taken_at, reserved_at = now})) == 0 then
+      size = size, mime = mime, taken_at = taken_at, reserved_at = now, tag = tag, ke = key_epoch})) == 0 then
     return ok('IN_PROGRESS')
   end
+  redis.call('HSET', keys[7], tag, sha)
   put_json(keys[4], new_id, {sha = sha, uploader = uid, size = size, reserved_at = now})
   redis.call('HINCRBY', keys[1], 'reserved_bytes', size)
   local lk = lease_key(sid, new_id)
@@ -336,7 +388,7 @@ local function f_report_stored(keys, args)
   redis.call('HDEL', keys[4], upload_id)
   redis.call('DEL', lease_key(sid, upload_id))
   local id = append_event(keys, now, retention, {'t', 'PHOTO_STORED', 'sha', sha, 'up', e.uploader,
-                          'sz', e.size, 'ta', e.taken_at, 'ex', expires_at})
+                          'sz', e.size, 'ta', e.taken_at, 'ex', expires_at, 'tg', e.tag or '', 'ke', e.ke or 0})
   return ok('APPLIED', id, e.reserved_at)
 end
 
@@ -404,9 +456,7 @@ local function f_recount(keys, args)
     local sha, e = photos[i], cjson.decode(photos[i + 1])
     if e.status == 'UPLOADING' then
       if redis.call('EXISTS', lease_key(sid, e.upload_id)) == 0 and now - e.reserved_at >= takeover_ms then
-        redis.call('HDEL', keys[3], sha)
-        redis.call('HDEL', keys[4], e.upload_id)
-        redis.call('HINCRBY', keys[1], 'reserved_bytes', -e.size)
+        release_reservation(keys, sid, sha, e.upload_id)
         released = released + 1
       else
         reserved = reserved + e.size
@@ -481,12 +531,12 @@ local function f_snapshot(keys, args)
   for i = 1, #photos, 2 do
     local sha, e = photos[i], cjson.decode(photos[i + 1])
     if e.status == 'STORED' and tonumber(e.expires_at) > now then
-      table.insert(live, {sha, e.uploader, e.size, e.taken_at, e.expires_at})
+      table.insert(live, {sha, e.uploader, e.size, e.taken_at, e.expires_at, e.tag or '', e.ke or 0})
     elseif e.status == 'RECALLED' then
       table.insert(recalled, sha)
     end
   end
-  return ok(cursor, redis.call('HKEYS', keys[2]), live, recalled)
+  return ok(cursor, redis.call('HKEYS', keys[2]), live, recalled, tonumber(redis.call('HGET', keys[1], 'epoch') or 0))
 end
 
 -- ARGV: sid, now, retention, uid, since, limit  ->  {entries}
@@ -504,6 +554,82 @@ local function f_ws_check(keys, args)
   if bad then return bad end
   if needs_resync(keys, args[5]) then return err('RESYNC_REQUIRED') end
   return ok()
+end
+
+------------------------------------------------------------------------------------- end-to-end keys
+
+-- ARGV: sid, now, retention, uid  ->  {epoch, rotation_required, members {uid, pk, ke}, mine {epoch, from, box}}
+local function f_key_state(keys, args)
+  local uid = args[4]
+  local bad = member_check(keys, uid)
+  if bad then return bad end
+  local s = redis.call('HMGET', keys[1], 'epoch', 'rotate')
+  local members, mine = {}, {}
+  local all = redis.call('HGETALL', keys[2])
+  for i = 1, #all, 2 do
+    local m = cjson.decode(all[i + 1])
+    table.insert(members, {all[i], m.pk or '', m.ke or 0})
+  end
+  local boxes = redis.call('HGETALL', keys[8])
+  for i = 1, #boxes, 2 do
+    local epoch, to = string.match(boxes[i], '^(%d+):(.+)$')
+    if to == uid then
+      local b = cjson.decode(boxes[i + 1])
+      table.insert(mine, {tonumber(epoch), b.from, b.box})
+    end
+  end
+  return ok(tonumber(s[1] or 0), s[2] == '1' and 1 or 0, members, mine)
+end
+
+-- Sharing (rotate '0'): store boxes for members who lack that epoch; the first sealer wins.
+-- Rotation (rotate '1'): start epoch = current + 1, with a box for every other member.
+-- ARGV: sid, now, retention, caller, epoch, rotate, n, then n pairs (uid, box hex)  ->  {epoch, stored}
+local function f_put_keys(keys, args)
+  local sid, now, retention, caller = args[1], tonumber(args[2]), tonumber(args[3]), args[4]
+  local epoch, rotate, n = tonumber(args[5]), args[6] == '1', tonumber(args[7])
+  local bad = member_check(keys, caller)
+  if bad then return bad end
+  local c = get_json(keys[2], caller)
+  local cur = tonumber(redis.call('HGET', keys[1], 'epoch') or '0')
+  if rotate then
+    if epoch ~= cur + 1 then return err('EPOCH_TAKEN') end
+    if (c.ke or 0) < 1 then return err('KEY_REQUIRED') end
+    local given = {}
+    for i = 0, n - 1 do given[args[8 + 2 * i]] = args[9 + 2 * i] end
+    local all = redis.call('HKEYS', keys[2])
+    for _, uid in ipairs(all) do
+      if uid ~= caller and not given[uid] then return err('KEYS_INCOMPLETE') end
+    end
+    for _, uid in ipairs(all) do
+      if given[uid] then
+        redis.call('HSET', keys[8], epoch .. ':' .. uid, cjson.encode({from = caller, box = given[uid]}))
+      end
+      local m = get_json(keys[2], uid)
+      m.ke = epoch
+      put_json(keys[2], uid, m)
+    end
+    redis.call('HSET', keys[1], 'epoch', epoch, 'rotate', '0')
+    append_event(keys, now, retention, {'t', 'KEY_ROTATED', 'm', caller, 'ke', epoch})
+    return ok(epoch, #all - 1)
+  end
+  if epoch < 1 or epoch > cur then return err('KEY_EPOCH_STALE') end
+  if (c.ke or 0) < epoch then return err('KEY_REQUIRED') end
+  local stored = 0
+  for i = 0, n - 1 do
+    local uid, box = args[8 + 2 * i], args[9 + 2 * i]
+    local m = get_json(keys[2], uid)
+    local field = epoch .. ':' .. uid
+    if m and uid ~= caller and redis.call('HEXISTS', keys[8], field) == 0 then
+      redis.call('HSET', keys[8], field, cjson.encode({from = caller, box = box}))
+      stored = stored + 1
+      if (m.ke or 0) < epoch then
+        m.ke = epoch
+        put_json(keys[2], uid, m)
+      end
+      append_event(keys, now, retention, {'t', 'KEY_SHARED', 'm', uid, 'ke', epoch})
+    end
+  end
+  return ok(cur, stored)
 end
 
 ----------------------------------------------------------------------------------- one-session pointer
@@ -549,6 +675,8 @@ redis.register_function('touch_lease', f_touch_lease)
 redis.register_function{function_name = 'upload_check', callback = f_upload_check, flags = RO}
 redis.register_function{function_name = 'download_check', callback = f_download_check, flags = RO}
 redis.register_function{function_name = 'snapshot', callback = f_snapshot, flags = RO}
+redis.register_function{function_name = 'key_state', callback = f_key_state, flags = RO}
+redis.register_function('put_keys', f_put_keys)
 redis.register_function{function_name = 'events_since', callback = f_events_since, flags = RO}
 redis.register_function{function_name = 'ws_check', callback = f_ws_check, flags = RO}
 redis.register_function('ptr_cas', f_ptr_cas)

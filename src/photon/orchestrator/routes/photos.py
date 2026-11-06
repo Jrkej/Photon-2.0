@@ -8,7 +8,7 @@ from collections.abc import Awaitable, Callable
 from fastapi import APIRouter, Depends, Request, Response
 
 from photon import db
-from photon.common import clock, ids, metrics, ratelimit
+from photon.common import clock, e2ee, ids, metrics, ratelimit
 from photon.common.errors import ApiError
 from photon.common.pb import photon_pb2 as pb
 from photon.common.proto import parse_body, proto_response, sha_from_hex, sha_hex
@@ -34,14 +34,17 @@ def router(svc: Svc, user: Callable[[Request], Awaitable[str]]) -> APIRouter:
             raise ApiError("INVALID_REQUEST", "size and taken_at_ms must be plausible")
         if body.size > s.max_photo_bytes:
             raise ApiError("TOO_LARGE", f"Photos are limited to {s.max_photo_bytes} bytes")
-        if body.mime not in s.allowed_mimes:
-            raise ApiError("UNSUPPORTED_FORMAT", "Only JPEG, PNG, WebP and HEIC photos are accepted")
+        if body.mime != e2ee.MIME:
+            raise ApiError("UNSUPPORTED_FORMAT", f"Photos must be end-to-end encrypted ({e2ee.MIME}, see e2ee.md)")
+        if len(body.photo_tag) != 32 or body.key_epoch < 1:
+            raise ApiError("INVALID_REQUEST", "photo_tag (32 bytes) and key_epoch are required")
         await ratelimit.hit(svc.r, K.rl("announce", uid), s.announce_per_minute, 60)
         try:
             res = await svc.fn.call(
                 "announce", K.session_keys(sid), sid, now, svc.ret, uid, sha, body.size, body.mime,
                 body.taken_at_ms, ids.new_upload_id(), s.session_quota_bytes, s.max_live_uploads_user,
-                s.max_live_uploads_session, s.max_strikes, s.lease_ms, s.takeover_ms,
+                s.max_live_uploads_session, s.max_strikes, s.lease_ms, s.takeover_ms, body.photo_tag.hex(),
+                body.key_epoch,
             )
         except ApiError as e:
             if e.code in ("TOO_MANY_UPLOADS", "QUOTA_EXCEEDED"):
@@ -56,7 +59,7 @@ def router(svc: Svc, user: Callable[[Request], Awaitable[str]]) -> APIRouter:
                 metrics.takeovers_total.inc()
             token = upload_tokens.mint(
                 svc.keys.upload, s.upload_token_ttl_s, sid=sid, sha=sha, size=body.size, mime=body.mime,
-                taken_at_ms=body.taken_at_ms, uploader=uid, upload_id=upload_id,
+                taken_at_ms=body.taken_at_ms, uploader=uid, upload_id=upload_id, key_epoch=body.key_epoch,
             )
             return proto_response(pb.AnnounceResponse(
                 result=pb.AnnounceResponse.UPLOAD,

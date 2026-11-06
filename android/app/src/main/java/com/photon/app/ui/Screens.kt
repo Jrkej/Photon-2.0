@@ -65,6 +65,7 @@ import com.photon.app.data.db.ReceivedPhoto
 import com.photon.app.data.db.SessionState
 import com.photon.app.data.db.UploadState
 import com.photon.app.events.ConnectionState
+import com.photon.app.upload.Uploader
 
 @Composable
 fun HomeScreen(vm: AppViewModel, onScan: () -> Unit) {
@@ -111,6 +112,7 @@ fun SessionScreen(vm: AppViewModel, session: SessionState) {
     val received by vm.received.collectAsStateWithLifecycle()
     val mine by vm.mine.collectAsStateWithLifecycle()
     val connection by vm.connection.collectAsStateWithLifecycle()
+    val keys by vm.keyStatus.collectAsStateWithLifecycle()
 
     var recallTarget by remember { mutableStateOf<String?>(null) }
     var reportTarget by remember { mutableStateOf<String?>(null) }
@@ -122,6 +124,7 @@ fun SessionScreen(vm: AppViewModel, session: SessionState) {
     ) {
         item { Spacer(Modifier.height(8.dp)) }
         item { SyncCard(session, connection, enabled = !ui.busy, onPausedChange = vm::setPaused) }
+        if (keys?.holdsCurrent == false) item { KeyWaitCard() }
         item { BatteryOptimizationCard() }
         item { PermissionCards(vm) }
         item { InviteCard(session, onRotate = vm::rotateInvites, busy = ui.busy) }
@@ -222,6 +225,23 @@ private fun SyncCard(session: SessionState, connection: ConnectionState, enabled
     }
 }
 
+/**
+ * e2ee.md 5.3: a newcomer can't send or open photos until some member's app has sealed the session key for
+ * it, which happens automatically when one of them is online.
+ */
+@Composable
+private fun KeyWaitCard() {
+    Card(
+        Modifier.fillMaxWidth().testTag("key-wait"),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(stringResource(R.string.key_wait_title), style = MaterialTheme.typography.titleMedium)
+            Text(stringResource(R.string.key_wait_body), style = MaterialTheme.typography.bodyMedium)
+        }
+    }
+}
+
 private fun connectionLabel(state: ConnectionState) = when (state) {
     ConnectionState.LIVE -> "Live"
     ConnectionState.CONNECTING -> "Connecting…"
@@ -266,6 +286,7 @@ private fun ReceivedTile(photo: ReceivedPhoto, canRecall: Boolean, onRecall: () 
             when (photo.state) {
                 ReceiveState.SAVED -> "Saved"
                 ReceiveState.PREVIEW -> "Preview"
+                ReceiveState.FAILED -> "Couldn't be verified"
                 else -> if (photo.thumbPath == null) "Loading…" else "Thumbnail"
             },
             style = MaterialTheme.typography.labelSmall,
@@ -294,7 +315,12 @@ private fun MineRow(photo: PendingPhoto, onRecall: () -> Unit) {
     }
 }
 
-private fun uploadLabel(photo: PendingPhoto) = when (photo.state) {
+private fun uploadLabel(photo: PendingPhoto) = when {
+    !photo.isFinal && photo.lastError == Uploader.KEY_WAIT -> "Waiting for the session key"
+    else -> uploadStateLabel(photo)
+}
+
+private fun uploadStateLabel(photo: PendingPhoto) = when (photo.state) {
     UploadState.PENDING, UploadState.HASHED -> "Queued"
     UploadState.UPLOADING -> "Uploading"
     UploadState.WAITING -> "Someone else is uploading it"

@@ -48,6 +48,10 @@ object ErrorCodes {
     const val ALREADY_IN_SESSION = "ALREADY_IN_SESSION"
     const val UPLOAD_SUPERSEDED = "UPLOAD_SUPERSEDED"
     const val UPLOAD_FINALIZED = "UPLOAD_FINALIZED"
+    const val KEY_ROTATION_REQUIRED = "KEY_ROTATION_REQUIRED"
+    const val KEY_EPOCH_STALE = "KEY_EPOCH_STALE"
+    const val EPOCH_TAKEN = "EPOCH_TAKEN"
+    const val KEY_REQUIRED = "KEY_REQUIRED"
     const val SESSION_ENDED = "SESSION_ENDED"
     const val PHOTO_EXPIRED = "PHOTO_EXPIRED"
     const val PHOTO_RECALLED = "PHOTO_RECALLED"
@@ -100,6 +104,14 @@ object ErrorMapper {
         ErrorCodes.ALREADY_IN_SESSION to ErrorKind.CONFLICT,
         ErrorCodes.UPLOAD_SUPERSEDED to ErrorKind.CONFLICT,
         ErrorCodes.UPLOAD_FINALIZED to ErrorKind.CONFLICT,
+        // e2ee.md 7: rotate, then announce again.
+        ErrorCodes.KEY_ROTATION_REQUIRED to ErrorKind.CONFLICT,
+        // e2ee.md 7: run key maintenance, rebuild for the current epoch, announce again.
+        ErrorCodes.KEY_EPOCH_STALE to ErrorKind.CONFLICT,
+        // e2ee.md 5.4: another member started that epoch first; fetch its key instead.
+        ErrorCodes.EPOCH_TAKEN to ErrorKind.CONFLICT,
+        // e2ee.md 7: no key for the current epoch on this phone yet; wait for KEY_SHARED.
+        ErrorCodes.KEY_REQUIRED to ErrorKind.FORBIDDEN,
         ErrorCodes.SESSION_ENDED to ErrorKind.GONE,
         ErrorCodes.PHOTO_EXPIRED to ErrorKind.GONE,
         ErrorCodes.PHOTO_RECALLED to ErrorKind.GONE,

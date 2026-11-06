@@ -1,0 +1,37 @@
+\section{Conclusion}\label{sec:conclusion}
+
+\subsection{Summary of Achievements}
+
+PHOTON turns a group of phones into a live, shared camera roll. It solves the problem stated in Section~\ref{sec:intro} with standard protocols, used carefully:
+
+\begin{itemize}
+  \item \textbf{Verified before announced.} No member is told about a photo until the server has recomputed its SHA-256 and stored it, so content-addressed dedupe cannot be poisoned by a false claim.
+  \item \textbf{Reliable over unreliable networks.} Uploads are cut into checksummed chunks sent over HTTP/3 with HTTP/2 fallback; only lost chunks are resent, and every request is idempotent, so a retry after any failure is safe.
+  \item \textbf{No gaps, no duplicates.} One \texttt{XREAD} loop per socket delivers backlog and live events from the same durable stream; client-side deduplication by event id and hash turns at-least-once delivery into an exactly-once effect. Tests delivered 1{,}200 events across random reconnects, and 3{,}060 of 3{,}060 to 153 sockets.
+  \item \textbf{Safe under concurrency and delay.} All state transitions are atomic Redis functions, and every cross-service report is fenced by its \texttt{upload\_id}, so a stalled client can never undo newer state.
+  \item \textbf{Ephemeral by design.} Logical expiry is exact at 30 minutes, physical deletion is bounded by two independent sweepers, and there are no shareable links.
+  \item \textbf{Working on a real phone.} The Android app synced photos within about 2\,s in the background, also after its process was killed and after an update; 155 server tests, 135 Android tests and 90 iOS-core tests pass.
+\end{itemize}
+
+\subsection{Limitations}
+
+\begin{enumerate}
+  \item \textbf{No end-to-end encryption.} The server can read photos during their 30 minutes. Encrypting each photo with a per-session key held only by members would remove this, at the cost of server-side thumbnails and validation.
+  \item \textbf{HTTP/3 not measured on a phone.} HTTP/3 is configured at the edge and supported by the Android client, but the device tests ran against the development server over HTTP/1.1, without the edge proxy.
+  \item \textbf{iOS app not compiled.} The PhotonKit core is built and tested; the SwiftUI app needs Xcode.
+  \item \textbf{Single machine.} Benchmarks and the load test ran on one laptop, and the Docker deployment was written but not run on the build machine.
+\end{enumerate}
+
+\subsection{Future Work}
+
+\begin{enumerate}
+  \item \textbf{End-to-end encryption} with a session key exchanged through the join flow, and thumbnails made on the uploading phone.
+  \item \textbf{Measuring HTTP/3 against HTTP/2} on real mobile links, including uploads that continue across a Wi-Fi to LTE handover through QUIC connection migration.
+  \item \textbf{Peer-to-peer delivery} between phones on the same Wi-Fi network (for example with WebRTC data channels), using the server only for signalling and verification.
+  \item \textbf{Object storage and Redis Cluster} for horizontal scaling; the keys already carry \texttt{\{sid\}} hash tags and the storage layout is ready for S3.
+  \item \textbf{Video and Live Photos}, with resumable uploads of larger files and streaming previews.
+\end{enumerate}
+
+\subsection{Final Remarks}
+
+The project showed that the hard part of a "simple" sharing feature is the network between the phones: lost packets, changing addresses, stalled uploads, duplicated retries and missed notifications. Each was handled with a standard mechanism from computer networks, namely QUIC, selective retransmission, idempotent requests, leases, fencing tokens and a durable event log, and each was tested both in code and on a real device.
